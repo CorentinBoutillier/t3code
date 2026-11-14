@@ -508,15 +508,49 @@ function openClientEntries<
   return orderClientEntries(entries, { alphabetical: input.alphabetical, order: input.order });
 }
 
-/** The rail lists every client, with or without active threads, in the tree's order. */
+/** Each thread's project, as `environmentId:projectId`. */
+export function sidebarThreadProjectRefs(
+  threads: ReadonlyArray<{ readonly environmentId: string; readonly projectId: string }>,
+): Set<string> {
+  return new Set(threads.map((thread) => `${thread.environmentId}:${thread.projectId}`));
+}
+
+/**
+ * Pinning picks what the client folders show: a folder shows while its project is pinned or
+ * has an active thread (active, working or pinned section), settled history alone is not enough.
+ */
+export function isSidebarFolderShown(
+  group: {
+    readonly pinned?: boolean | undefined;
+    readonly archived?: boolean | undefined;
+    readonly memberProjectRefs: ReadonlyArray<{
+      readonly environmentId: string;
+      readonly projectId: string;
+    }>;
+  },
+  activeProjectRefs: ReadonlySet<string>,
+): boolean {
+  return (
+    (group.pinned === true && group.archived !== true) ||
+    group.memberProjectRefs.some((ref) =>
+      activeProjectRefs.has(`${ref.environmentId}:${ref.projectId}`),
+    )
+  );
+}
+
+/**
+ * The rail lists clients in the tree's order; with `isShown`, only those with a shown project.
+ * An entry keeps all its open projects, so picking it scopes the shelf to its whole history.
+ */
 export function buildSidebarClientRailEntries<
   TGroup extends ClientFolderGroup & { readonly projectKey: string },
 >(input: {
   readonly groups: readonly TGroup[];
   readonly alphabetical: boolean;
   readonly order?: SidebarClientFolderOrder | undefined;
+  readonly isShown?: ((group: TGroup) => boolean) | undefined;
 }): Array<SidebarClientRailEntry<TGroup>> {
-  return openClientEntries(input).map((entry): SidebarClientRailEntry<TGroup> => {
+  const entries = openClientEntries(input).map((entry): SidebarClientRailEntry<TGroup> => {
     if (entry.kind === "project") {
       const { group } = entry.folder;
       return {
@@ -540,6 +574,8 @@ export function buildSidebarClientRailEntries<
       groups,
     };
   });
+  const { isShown } = input;
+  return isShown === undefined ? entries : entries.filter((entry) => entry.groups.some(isShown));
 }
 
 /**

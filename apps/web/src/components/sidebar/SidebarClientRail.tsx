@@ -11,15 +11,15 @@ import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environ
 import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
-import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import * as Schema from "effect/Schema";
 import { useMessages } from "gt-react";
 import { LayoutGridIcon } from "lucide-react";
-import { memo, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { memo, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
 
 import { cn } from "~/lib/utils";
 import { contextMenuSourceOf } from "../../contextMenuSource";
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { useClientSettings } from "../../hooks/useSettings";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { readLocalApi } from "../../localApi";
@@ -27,14 +27,16 @@ import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useUiStateStore } from "../../uiStateStore";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { SIDEBAR_DRAG_DISTANCE, SidebarPointerSensor } from "../Sidebar.pointer";
-import { filterSidebarV2VisibleThreads } from "../Sidebar.logic";
+import { filterSidebarLiveThreads, useSnoozeWakeClock } from "../Sidebar.logic";
 import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   buildSidebarClientRailEntries,
   CLIENT_FOLDERS_ENABLED_KEY,
   CLIENT_RAIL_SELECTED_KEY,
+  isSidebarFolderShown,
   sidebarClientRailThreads,
+  sidebarThreadProjectRefs,
   sidebarClientFolderLevels,
   type SidebarClientRailEntry,
 } from "./clientFolders";
@@ -62,9 +64,18 @@ const RAIL_MODIFIERS = [restrictToVerticalAxis];
 export function useSidebarClientRail(input: {
   readonly boringSidebarEnabled: boolean;
   readonly groups: readonly SidebarProjectSnapshot[];
+  // Unscoped: a client stays listed while one of its projects is pinned or has an active thread.
+  readonly threads: readonly EnvironmentThreadShell[];
+  readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly serverConfigs: ReadonlyMap<EnvironmentId, unknown>;
+  readonly optimisticDrop: Parameters<typeof filterSidebarLiveThreads>[0]["drop"];
+  // The picked client left the rail; called before the pick clears to All.
+  readonly onSelectedHidden: (entry: RailEntry) => void;
 }): {
   // null while the rail is off: boring sidebar or client folders disabled.
   readonly entries: readonly RailEntry[] | null;
+  // Unscoped threads that are neither settled nor snoozed, for the rail's dots.
+  readonly liveThreads: readonly EnvironmentThreadShell[];
   // null is "All"; a stored client that is gone reads as All and returns with its projects.
   readonly selected: RailEntry | null;
   readonly select: (id: string | null) => void;
@@ -82,10 +93,43 @@ export function useSidebarClientRail(input: {
   );
   const [order, setOrder] = useSidebarClientFolderOrder();
   const enabled = input.boringSidebarEnabled && clientFoldersEnabled;
-  const entries = enabled
+  const { threads, delegatedUnderParent, serverConfigs, optimisticDrop } = input;
+  const nowMinute = useNowMinute();
+  const snoozeWakeClock = useSnoozeWakeClock(threads);
+  const liveThreads = enabled
+    ? railLiveThreads(threads, delegatedUnderParent, serverConfigs, optimisticDrop, [
+        nowMinute,
+        snoozeWakeClock,
+      ])
+    : NO_THREADS;
+  const activeProjectRefs = sidebarThreadProjectRefs(liveThreads);
+  const openEntries = enabled
     ? buildSidebarClientRailEntries({ groups: input.groups, alphabetical, order })
     : null;
+  const entries =
+    openEntries === null
+      ? null
+      : openEntries.filter((entry) =>
+          entry.groups.some((group) => isSidebarFolderShown(group, activeProjectRefs)),
+        );
   const selected = entries?.find((entry) => entry.id === storedId) ?? null;
+  // Left out only by the pinned-or-active rule: a project still loading or archived keeps the pick.
+  const hiddenSelection =
+    selected === null ? (openEntries?.find((entry) => entry.id === storedId) ?? null) : null;
+  const shownSelectionIdRef = useRef<string | null>(null);
+  const { onSelectedHidden } = input;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a picked client that leaves the rail clears the stored pick, so it does not take the view back when it returns
+  useEffect(() => {
+    if (selected !== null) {
+      shownSelectionIdRef.current = selected.id;
+      return;
+    }
+    // Only once it was shown: at startup its threads may not have loaded yet.
+    if (hiddenSelection === null || shownSelectionIdRef.current !== hiddenSelection.id) return;
+    shownSelectionIdRef.current = null;
+    onSelectedHidden(hiddenSelection);
+    setStoredId(null);
+  }, [hiddenSelection, onSelectedHidden, selected, setStoredId]);
   // Resolved against every open project, so entries the view hides keep their place.
   const moveEntry = (level: string, activeId: string, drop: SidebarOrderDrop) => {
     const levels = sidebarClientFolderLevels({ groups: input.groups, alphabetical, order });
@@ -95,12 +139,27 @@ export function useSidebarClientRail(input: {
   };
   return {
     entries,
+    liveThreads,
     selected,
     select: setStoredId,
     order: enabled ? order : undefined,
     moveEntry,
     resetOrder: () => setOrder(NO_CLIENT_FOLDER_ORDER),
   };
+}
+
+const NO_THREADS: readonly EnvironmentThreadShell[] = [];
+
+// The clock is an input so a new minute or a snooze wake recomputes, as the partition's key does.
+function railLiveThreads(
+  threads: readonly EnvironmentThreadShell[],
+  delegatedUnderParent: ReadonlySet<string>,
+  serverConfigs: ReadonlyMap<EnvironmentId, unknown>,
+  drop: Parameters<typeof filterSidebarLiveThreads>[0]["drop"],
+  _clock: readonly [string, number],
+) {
+  const now = new Date().toISOString();
+  return filterSidebarLiveThreads({ threads, delegatedUnderParent, serverConfigs, drop, now });
 }
 
 /** The boring sidebar's column of clients: picking one scopes the list beside it. */
@@ -110,14 +169,11 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
   onSelect: (id: string | null) => void;
   onMove: (level: string, activeId: string, drop: SidebarOrderDrop) => void;
   onResetOrder: () => void;
-  // Unscoped, so every client's dot stays live while another client is picked.
-  threads: readonly EnvironmentThreadShell[];
-  delegatedUnderParent: ReadonlySet<string>;
-  serverConfigs: ReadonlyMap<EnvironmentId, unknown>;
-  now: string;
+  // Unscoped and neither settled nor snoozed, so every client's dot stays live and calm.
+  liveThreads: readonly EnvironmentThreadShell[];
   routeRowThreadKey: string | null;
 }) {
-  const { entries, selectedId, onSelect, onMove, serverConfigs, now, routeRowThreadKey } = props;
+  const { entries, selectedId, onSelect, onMove, routeRowThreadKey } = props;
   const [drag, setDrag] = useState<{
     readonly activeId: string;
     readonly drop: SidebarOrderDrop | null;
@@ -143,20 +199,10 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
     };
   };
   const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
-  // Settled and snoozed threads asked to be left alone, so they light no dot.
-  const dotThreads = filterSidebarV2VisibleThreads(
-    props.threads,
-    null,
-    props.delegatedUnderParent,
-  ).filter(
-    (thread) =>
-      !serverConfigs.has(thread.environmentId) ||
-      (thread.settledOverride !== "settled" && !effectiveSnoozed(thread, { now })),
-  );
   // Pinned threads and the open one stay out, as on the client header.
   const threadsByEntry = sidebarClientRailThreads(
     entries,
-    dotThreads,
+    props.liveThreads,
     (thread) =>
       scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeRowThreadKey,
   );

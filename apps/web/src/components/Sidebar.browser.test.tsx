@@ -613,7 +613,7 @@ function settledShell(projectId: ProjectId, index: number, settledAt: string) {
 
 function setupClientFolders(
   stack: DisposableStack,
-  options: { withProjectGroup?: boolean; settled?: boolean } = {},
+  options: { withProjectGroup?: boolean; settled?: boolean; umbrellaPinned?: boolean } = {},
 ) {
   const previousSettings = getClientSettings();
   stack.defer(() => __setClientSettingsForTests(previousSettings));
@@ -639,7 +639,12 @@ function setupClientFolders(
   const solo = { ...project("vandelay"), title: "Vandelay" };
   const web = { ...project("atlas-web"), title: "Northwind · Atlas · Web" };
   const site = { ...project("atlas-site"), title: "Northwind · Atlas · Site" };
-  const umbrella = { ...project("umbrella"), title: "Umbrella" };
+  // Pinned, so its settled-only folder shows; unpinned, it leaves the rail and the tree.
+  const umbrella = {
+    ...project("umbrella"),
+    title: "Umbrella",
+    pinnedAt: options.umbrellaPinned === false ? null : "2026-01-02T00:00:00.000Z",
+  };
   const nested = options.withProjectGroup === true;
   const settled = options.settled === true;
   // Partitioning settles threads only for an environment whose config has loaded.
@@ -708,7 +713,7 @@ function setupClientFolders(
     routeDraftId: null,
     routeThreadRef,
   });
-  return { app, solo, threads, startThread };
+  return { app, infra, solo, umbrella, threads, startThread };
 }
 
 async function jumpLabelsByThreadId() {
@@ -1184,7 +1189,7 @@ describe("boring sidebar client folders", () => {
     await expect
       .element(screen.getByText("Thread 10", { exact: true }).first())
       .not.toBeInTheDocument();
-    // Umbrella has nothing but settled threads, and still shows.
+    // Umbrella has nothing but settled threads, and still shows while pinned.
     await expect
       .element(
         screen.getByTestId("sidebar-project-folder").getByRole("button", { name: /^Umbrella/ }),
@@ -1256,7 +1261,8 @@ describe("boring sidebar client folders", () => {
       writeLocalStorageValue(CLIENT_FOLDERS_ENABLED_KEY, false, false, Schema.Boolean),
     );
     await expect.element(screen.getByTestId("sidebar-folder-settled")).not.toBeInTheDocument();
-    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(3);
+    // Pinned Umbrella keeps its empty folder, as any pinned project does.
+    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(4);
     await vi.waitFor(() =>
       expect(screen.getByTestId("sidebar-settled-shelf-toggle").element().textContent).toMatch(
         /5$/,
@@ -1335,6 +1341,293 @@ describe("boring sidebar client folders", () => {
       variantAction: "settle",
       navigationParent: expect.stringMatching(/^folder:/),
     });
+  });
+
+  it("hides an unpinned project with only settled threads, its history back on the shelf", async () => {
+    using stack = new DisposableStack();
+    const { app, infra, solo, umbrella, threads } = setupClientFolders(stack, {
+      settled: true,
+      umbrellaPinned: false,
+    });
+    const legacy = { ...project("acme-legacy"), title: "Acme · Legacy" };
+    vi.mocked(useProjects).mockReturnValue([app, infra, solo, umbrella, legacy]);
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads,
+      settledShell(legacy.id, 15, "2026-03-06T10:00:00.000Z"),
+    ]);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await expect.element(rail.getByRole("button", { name: /^Acme/ })).toBeInTheDocument();
+    // All, Acme and Vandelay: Umbrella has nothing pinned and nothing active.
+    expect(rail.getByRole("button").all()).toHaveLength(3);
+    await expect.element(rail.getByRole("button", { name: /^Umbrella/ })).not.toBeInTheDocument();
+    await expect
+      .element(
+        screen.getByTestId("sidebar-project-folder").getByRole("button", { name: /^Umbrella/ }),
+      )
+      .not.toBeInTheDocument();
+    // Vandelay still has an active thread, so its folder keeps its Settled row.
+    await expect
+      .element(screen.getByRole("button", { name: "Settled · 2", exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(screen.getByRole("button", { name: "Settled · 1", exact: true }))
+      .not.toBeInTheDocument();
+    const shelf = screen.getByTestId("sidebar-settled-shelf-toggle");
+    // Umbrella's, Legacy's and the projectless thread; Acme App's stays in its folder.
+    await vi.waitFor(() => expect(shelf.element().textContent).toMatch(/(^|\D)3$/));
+
+    // Inside the picked client, the hidden repository's thread stays on the shelf too.
+    await userEvent.click(rail.getByRole("button", { name: /^Acme/ }));
+    await expect.element(screen.getByRole("button", { name: /^App/ })).toBeInTheDocument();
+    await expect.element(screen.getByRole("button", { name: /^Infra/ })).toBeInTheDocument();
+    await expect.element(screen.getByRole("button", { name: /^Legacy/ })).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(shelf.element().textContent).toMatch(/(^|\D)1$/));
+    // The shelf's open state is stored, so an earlier test may have left it open.
+    if (shelf.element().getAttribute("aria-expanded") !== "true") await userEvent.click(shelf);
+    await expect
+      .element(screen.getByText("Thread 15", { exact: true }).first())
+      .toBeInTheDocument();
+
+    // Without client folders the sidebar is as before.
+    await act(() =>
+      writeLocalStorageValue(CLIENT_FOLDERS_ENABLED_KEY, false, false, Schema.Boolean),
+    );
+    await expect.element(rail).not.toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(3);
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("sidebar-settled-shelf-toggle").element().textContent).toMatch(
+        /(^|\D)6$/,
+      ),
+    );
+  });
+
+  it("shows an unpinned project in the rail and the tree while it has an active thread", async () => {
+    using stack = new DisposableStack();
+    const { umbrella, threads } = setupClientFolders(stack, {
+      settled: true,
+      umbrellaPinned: false,
+    });
+    vi.mocked(useQuietThreadShells).mockReturnValue([...threads, threadShell(umbrella.id, 16)]);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    await expect
+      .element(screen.getByTestId("sidebar-client-rail").getByRole("button", { name: /^Umbrella/ }))
+      .toBeInTheDocument();
+    await expect
+      .element(
+        screen.getByTestId("sidebar-project-folder").getByRole("button", { name: /^Umbrella/ }),
+      )
+      .toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 16", { exact: true }).first())
+      .toBeInTheDocument();
+    await expect
+      .element(screen.getByRole("button", { name: "Settled · 1", exact: true }))
+      .toBeInTheDocument();
+  });
+
+  it("drops an unpinned client from the rail live, falling back to All for good", async () => {
+    using stack = new DisposableStack();
+    const { app, infra, solo, umbrella, threads } = setupClientFolders(stack, { settled: true });
+    const routeReveal = { observedKey: null, pendingKey: null };
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    const umbrellaEntry = rail.getByRole("button", { name: /^Umbrella/ });
+    const all = rail.getByRole("button", { name: "All", exact: true });
+    const umbrellaFolder = screen
+      .getByTestId("sidebar-project-folder")
+      .getByRole("button", { name: /^Umbrella/ });
+    await userEvent.click(umbrellaEntry);
+    await expect.element(umbrellaEntry).toHaveAttribute("aria-pressed", "true");
+    await expect
+      .element(screen.getByText("Thread 3", { exact: true }).first())
+      .not.toBeInTheDocument();
+
+    const rerenderWith = async (
+      pinnedAt: string | null,
+      extraThreads: readonly EnvironmentThreadShell[] = [],
+    ) => {
+      vi.mocked(useProjects).mockReturnValue([app, infra, solo, { ...umbrella, pinnedAt }]);
+      vi.mocked(useQuietThreadShells).mockReturnValue([...threads, ...extraThreads]);
+      await screen.rerender(
+        <SidebarProvider>
+          <Sidebar routeReveal={routeReveal} />
+        </SidebarProvider>,
+      );
+    };
+    await rerenderWith(null);
+    await expect.element(umbrellaEntry).not.toBeInTheDocument();
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+    await expect.element(umbrellaFolder).not.toBeInTheDocument();
+
+    // Pinned back, it returns in its place without taking the view back.
+    await rerenderWith("2026-01-03T00:00:00.000Z");
+    await expect.element(umbrellaEntry).toBeInTheDocument();
+    await expect.element(umbrellaFolder).toBeInTheDocument();
+    await expect.element(umbrellaEntry).toHaveAttribute("aria-pressed", "false");
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+
+    // An active thread brings it back too, and the view stays on All.
+    await userEvent.click(umbrellaEntry);
+    await expect.element(umbrellaEntry).toHaveAttribute("aria-pressed", "true");
+    await rerenderWith(null);
+    await expect.element(umbrellaEntry).not.toBeInTheDocument();
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await rerenderWith(null, [threadShell(umbrella.id, 16)]);
+    await expect.element(umbrellaEntry).toBeInTheDocument();
+    await expect.element(umbrellaEntry).toHaveAttribute("aria-pressed", "false");
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+  });
+
+  it("follows an unpinned client's threads as they settle, snooze and wake", async () => {
+    using stack = new DisposableStack();
+    const { umbrella, threads } = setupClientFolders(stack, {
+      settled: true,
+      umbrellaPinned: false,
+    });
+    const routeReveal = { observedKey: null, pendingKey: null };
+    const rerenderWith = async (umbrellaThread: EnvironmentThreadShell) => {
+      vi.mocked(useQuietThreadShells).mockReturnValue([...threads, umbrellaThread]);
+      await screen.rerender(
+        <SidebarProvider>
+          <Sidebar routeReveal={routeReveal} />
+        </SidebarProvider>,
+      );
+    };
+    const active = threadShell(umbrella.id, 16);
+    vi.mocked(useQuietThreadShells).mockReturnValue([...threads, active]);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    const umbrellaEntry = rail.getByRole("button", { name: /^Umbrella/ });
+    const all = rail.getByRole("button", { name: "All", exact: true });
+    const umbrellaFolder = screen
+      .getByTestId("sidebar-project-folder")
+      .getByRole("button", { name: /^Umbrella/ });
+    await userEvent.click(umbrellaEntry);
+    await expect.element(umbrellaEntry).toHaveAttribute("aria-pressed", "true");
+
+    // Settled, its last active thread takes the client out of the rail; the view falls back.
+    await rerenderWith({
+      ...active,
+      settledOverride: "settled",
+      settledAt: "2026-03-07T10:00:00.000Z",
+    });
+    await expect.element(umbrellaEntry).not.toBeInTheDocument();
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await expect.element(umbrellaFolder).not.toBeInTheDocument();
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+
+    // Snoozed is parked too.
+    await rerenderWith({ ...active, snoozedUntil: "2099-01-01T00:00:00.000Z" });
+    await expect.element(umbrellaEntry).not.toBeInTheDocument();
+    await expect.element(umbrellaFolder).not.toBeInTheDocument();
+
+    // Active again, it returns without taking the view back.
+    await rerenderWith(active);
+    await expect.element(umbrellaEntry).toBeInTheDocument();
+    await expect.element(umbrellaFolder).toBeInTheDocument();
+    await expect.element(umbrellaEntry).toHaveAttribute("aria-pressed", "false");
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("drops a vanished client's projects from the filter when the rail falls back to All", async () => {
+    using stack = new DisposableStack();
+    const { app, infra, solo, umbrella } = setupClientFolders(stack, { settled: true });
+    const routeReveal = { observedKey: null, pendingKey: null };
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await userEvent.click(rail.getByRole("button", { name: /^Umbrella/ }));
+    await act(() =>
+      useUiStateStore.setState({ sidebarProjectScopeKeys: [derivePhysicalProjectKey(umbrella)] }),
+    );
+    await expect
+      .element(screen.getByText("Thread 3", { exact: true }).first())
+      .not.toBeInTheDocument();
+
+    vi.mocked(useProjects).mockReturnValue([app, infra, solo, { ...umbrella, pinnedAt: null }]);
+    await screen.rerender(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    await expect
+      .element(rail.getByRole("button", { name: "All", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    await expect.poll(() => useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([]);
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+    await expect
+      .element(
+        screen.getByTestId("sidebar-project-folder").getByRole("button", { name: /^Umbrella/ }),
+      )
+      .not.toBeInTheDocument();
+  });
+
+  it("keeps All in the rail while no project is pinned or active", async () => {
+    using stack = new DisposableStack();
+    const { threads } = setupClientFolders(stack, { settled: true, umbrellaPinned: false });
+    vi.mocked(useQuietThreadShells).mockReturnValue(
+      threads.filter((thread) => thread.settledOverride === "settled"),
+    );
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await expect.element(rail).toBeInTheDocument();
+    await expect
+      .element(rail.getByRole("button", { name: "All", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(rail.getByRole("button").all()).toHaveLength(1);
+    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(0);
+  });
+
+  it("shows the folder of an unpinned project whose only live thread is pinned", async () => {
+    using stack = new DisposableStack();
+    const { umbrella, threads } = setupClientFolders(stack, {
+      settled: true,
+      umbrellaPinned: false,
+    });
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads.filter((thread) => thread.projectId !== umbrella.id),
+      { ...threadShell(umbrella.id, 16), pinnedAt: "2026-03-08T10:00:00.000Z" },
+    ]);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    const umbrellaFolder = screen
+      .getByTestId("sidebar-project-folder")
+      .getByRole("button", { name: /^Umbrella/ });
+    await expect.element(rail.getByRole("button", { name: /^Umbrella/ })).toBeInTheDocument();
+    await expect.element(umbrellaFolder).toBeInTheDocument();
+    await userEvent.click(rail.getByRole("button", { name: /^Umbrella/ }));
+    await expect.element(umbrellaFolder).toBeInTheDocument();
   });
 
   it("pages a folder's long settled list like the shelf", async () => {

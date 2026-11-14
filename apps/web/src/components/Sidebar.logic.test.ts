@@ -37,6 +37,7 @@ import {
   type SidebarSection,
   resolveSidebarDropVerb,
   groupSidebarThreadsByProject,
+  filterSidebarLiveThreads,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
   withoutRemovedCheckout,
@@ -1669,6 +1670,71 @@ describe("sidebarFolderExpansionKeys", () => {
     expect(resolveProjectExpanded({}, keys)).toBe(true);
     expect(resolveProjectExpanded({ [cwdKey]: false }, keys)).toBe(false);
     expect(resolveProjectExpanded({ [keys[0]!]: true, [cwdKey]: false }, keys)).toBe(true);
+  });
+});
+
+describe("filterSidebarLiveThreads", () => {
+  const now = "2026-03-10T00:00:00.000Z";
+  const shell = (id: string, overrides: ThreadFixtureOverrides = {}) =>
+    makeThreadFixture({
+      environmentId: localEnvironmentId,
+      id: ThreadId.make(id),
+      projectId: ProjectId.make("acme"),
+      ...overrides,
+    });
+  const threads = [
+    shell("active"),
+    shell("pinned", { pinnedAt: "2026-03-01T00:00:00.000Z" }),
+    shell("settled", { settledOverride: "settled", settledAt: "2026-03-02T00:00:00.000Z" }),
+    shell("snoozed", { snoozedUntil: "2099-01-01T00:00:00.000Z" }),
+    shell("woken", { snoozedUntil: "2026-03-09T00:00:00.000Z" }),
+    shell("archived", { archivedAt: "2026-03-03T00:00:00.000Z" }),
+  ];
+  const live = (input: {
+    readonly drop?: { readonly key: string; readonly section: "pinned" | "active" | "settled" };
+    readonly configLoaded?: boolean;
+  }) =>
+    filterSidebarLiveThreads({
+      threads,
+      delegatedUnderParent: new Set(),
+      serverConfigs: new Map(input.configLoaded === false ? [] : [[localEnvironmentId, {}]]),
+      drop: input.drop ?? null,
+      now,
+    }).map((thread) => thread.id);
+  const keyOf = (id: string) =>
+    scopedThreadKey(scopeThreadRef(localEnvironmentId, ThreadId.make(id)));
+
+  it("keeps the threads of the pinned and active sections", () => {
+    expect(live({})).toEqual(["active", "pinned", "woken"]);
+  });
+
+  it("reads a dragged thread in the section it was dropped on", () => {
+    expect(live({ drop: { key: keyOf("active"), section: "settled" } })).toEqual([
+      "pinned",
+      "woken",
+    ]);
+    expect(live({ drop: { key: keyOf("settled"), section: "active" } })).toEqual([
+      "active",
+      "pinned",
+      "settled",
+      "woken",
+    ]);
+    expect(live({ drop: { key: keyOf("snoozed"), section: "pinned" } })).toEqual([
+      "active",
+      "pinned",
+      "snoozed",
+      "woken",
+    ]);
+  });
+
+  it("settles and snoozes nothing before the environment's config loaded", () => {
+    expect(live({ configLoaded: false })).toEqual([
+      "active",
+      "pinned",
+      "settled",
+      "snoozed",
+      "woken",
+    ]);
   });
 });
 
