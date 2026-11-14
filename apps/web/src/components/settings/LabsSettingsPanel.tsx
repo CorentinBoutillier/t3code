@@ -1,9 +1,12 @@
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
 import { useAuth } from "@clerk/react";
 import { Link } from "@tanstack/react-router";
+import * as Schema from "effect/Schema";
 import { T, useGT, useMessages } from "gt-react";
 
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
+import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { CLIENT_FOLDERS_ENABLED_KEY } from "../sidebar/clientFolders";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
@@ -54,6 +57,7 @@ function BoringSidebarRow() {
       {settings.boringSidebarEnabled ? (
         <div className="mt-2 mb-2 border-l-2 border-border/60 ps-3">
           <BoringSidebarMultilineRow />
+          <BoringSidebarClientFoldersRow />
         </div>
       ) : null}
     </SettingsRow>
@@ -286,6 +290,24 @@ function FastWorktreeCheckoutRow() {
           checked={settings.fastWorktreeCheckout}
           onCheckedChange={(checked) => updateSettings({ fastWorktreeCheckout: Boolean(checked) })}
           aria-label={gt("Fast worktree checkout")}
+        />
+      }
+    />
+  );
+}
+
+function BoringSidebarClientFoldersRow() {
+  const [enabled, setEnabled] = useLocalStorage(CLIENT_FOLDERS_ENABLED_KEY, false, Schema.Boolean);
+  return (
+    <SettingsRow
+      title="Group folders by client"
+      className="px-0 py-2 sm:px-0"
+      description="Nest project folders under a client when the project is named “Client · Project”. Saved on this device."
+      control={
+        <Switch
+          checked={enabled}
+          onCheckedChange={(checked) => setEnabled(Boolean(checked))}
+          aria-label="Group folders by client"
         />
       }
     />
