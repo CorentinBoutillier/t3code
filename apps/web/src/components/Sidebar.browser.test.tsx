@@ -9,10 +9,13 @@ import {
   EnvironmentId,
   type LocalApi,
   ProjectId,
+  ProviderInstanceId,
   ThreadId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { isMacPlatform } from "@t3tools/shared/keybindings";
+import { derivePhysicalProjectKey } from "@t3tools/client-runtime/state/project-grouping";
+import * as Schema from "effect/Schema";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
@@ -21,6 +24,11 @@ import { openCommandPalette } from "../commandPaletteBus";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { makeThreadFixture } from "../test-fixtures";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import {
+  removeLocalStorageItem,
+  setLocalStorageItem,
+  writeLocalStorageValue,
+} from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { __setClientSettingsForTests, getClientSettings } from "../hooks/useSettings";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
@@ -29,10 +37,12 @@ import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "../state/en
 import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useTerminalUiStateStore } from "../terminalUiStateStore";
+import { useUiStateStore } from "../uiStateStore";
 import { readLocalApi } from "../localApi";
 import type { Project } from "../types";
 import Sidebar from "./Sidebar";
 import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "./Sidebar.logic";
+import { CLIENT_FOLDERS_ENABLED_KEY } from "./sidebar/clientFolders";
 import { SortableThreadRow } from "./sidebar/SidebarThreadRow";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -572,5 +582,209 @@ describe("sidebar settled pagination", () => {
     const loadedRows = screen.container.querySelectorAll("[data-thread-item]").length;
     await act(() => moreButton.click());
     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(loadedRows);
+  });
+});
+
+function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?: boolean } = {}) {
+  const previousSettings = getClientSettings();
+  stack.defer(() => __setClientSettingsForTests(previousSettings));
+  __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, boringSidebarEnabled: true });
+  const { projectExpandedById: previousExpanded, sidebarProjectScopeKeys: previousScope } =
+    useUiStateStore.getState();
+  stack.defer(() =>
+    useUiStateStore.setState({
+      projectExpandedById: previousExpanded,
+      sidebarProjectScopeKeys: previousScope,
+    }),
+  );
+  stack.defer(() => removeLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY));
+  setLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY, true, Schema.Boolean);
+  // Earlier tests leave the settled shelf open and the local API's context menu stubbed.
+  removeLocalStorageItem("t3code:sidebar:settled-expanded");
+  vi.mocked(readLocalApi).mockReset();
+  const app = { ...project("acme-app"), title: "Acme · App" };
+  const infra = { ...project("acme-infra"), title: "Acme · Infra" };
+  // Sorts after Acme, so only the closed client's wiring gives its thread a jump.
+  const solo = { ...project("zenith"), title: "Zenith" };
+  const web = { ...project("atlas-web"), title: "Northwind · Atlas · Web" };
+  const site = { ...project("atlas-site"), title: "Northwind · Atlas · Site" };
+  const nested = options.withProjectGroup === true;
+  const threads = [
+    threadShell(app.id, 0),
+    threadShell(app.id, 1),
+    {
+      ...threadShell(infra.id, 2),
+      runtime: {
+        status: "failed" as const,
+        activeRunId: null,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        providerName: "Codex",
+        lastError: null,
+        updatedAt: "2026-03-09T10:00:00.000Z",
+      },
+    },
+    threadShell(solo.id, 3),
+    ...(nested ? [threadShell(web.id, 4), threadShell(web.id, 5), threadShell(site.id, 6)] : []),
+  ];
+  const routeThreadRef: ScopedThreadRef = {
+    environmentId: app.environmentId,
+    threadId: threads[0]!.id,
+  };
+  vi.mocked(useProjects).mockReturnValue(
+    nested ? [app, infra, solo, web, site] : [app, infra, solo],
+  );
+  vi.mocked(useQuietThreadShells).mockReturnValue(threads);
+  vi.mocked(useThreadRouteTarget).mockReturnValue({ kind: "server", threadRef: routeThreadRef });
+  vi.mocked(useHandleNewThread).mockReturnValue({
+    activeDraftThread: null,
+    activeThread: null,
+    defaultProjectRef: { environmentId: app.environmentId, projectId: app.id },
+    defaultProjectFallbackReady: true,
+    handleNewThread: vi.fn().mockResolvedValue(null),
+    routeDraftId: null,
+    routeThreadRef,
+  });
+  return { app };
+}
+
+describe("boring sidebar client folders", () => {
+  it("groups folders under closed client headers that open on click", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const clientHeaders = screen.getByTestId("sidebar-client-folder");
+    const client = clientHeaders.getByRole("button");
+    await expect.element(client).toHaveAttribute("aria-expanded", "false");
+    expect(clientHeaders.all()).toHaveLength(1);
+    // Client monogram, then the failed Infra thread's dot; the count covers Thread 1 and Thread 2.
+    expect(client.element().textContent).toBe("AEAcme, failed2");
+    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(1);
+    await expect.element(screen.getByText("Thread 0", { exact: true }).first()).toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 1", { exact: true }).first())
+      .not.toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 2", { exact: true }).first())
+      .not.toBeInTheDocument();
+
+    await userEvent.click(client);
+    await expect.element(client).toHaveAttribute("aria-expanded", "true");
+    expect(client.element().textContent).toBe("AEAcme");
+    const appFolder = screen.getByRole("button", { name: /^App/ });
+    await expect.element(appFolder).toBeInTheDocument();
+    await expect.element(screen.getByRole("button", { name: /^Infra/ })).toBeInTheDocument();
+    await expect.element(screen.getByText("Thread 1", { exact: true }).first()).toBeInTheDocument();
+    await expect.element(screen.getByText("Thread 2", { exact: true }).first()).toBeInTheDocument();
+
+    await act(() => appFolder.element().focus());
+    await userEvent.keyboard("{ArrowLeft}");
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.element(client).toHaveFocus();
+
+    await act(() =>
+      writeLocalStorageValue(CLIENT_FOLDERS_ENABLED_KEY, false, false, Schema.Boolean),
+    );
+    await expect.element(screen.getByTestId("sidebar-client-folder")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(3);
+    await expect.element(screen.getByRole("button", { name: /^Acme · App/ })).toBeInTheDocument();
+  });
+
+  it("offers thread jumps only to rows a closed client still shows", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+
+    using _timers = fakeTimers();
+    const modifier = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+    const before = vi.mocked(SortableThreadRow).mock.calls.length;
+    await userEvent.keyboard(`{${modifier}>}`);
+    await act(() => vi.advanceTimersByTime(THREAD_JUMP_HINT_SHOW_DELAY_MS));
+    const jumpable = new Set(
+      vi
+        .mocked(SortableThreadRow)
+        .mock.calls.slice(before)
+        .filter(([props]) => props.jumpLabel !== null)
+        .map(([props]) => props.thread.id),
+    );
+    await userEvent.keyboard(`{/${modifier}}`);
+    expect(jumpable).toEqual(new Set(["thread-0", "thread-3"]));
+  });
+
+  it("nests a closed project group under its client, walked up by ArrowLeft", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { withProjectGroup: true });
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const header = (name: string) =>
+      screen.getByTestId("sidebar-client-folder").filter({ hasText: name }).getByRole("button");
+    const client = header("Northwind");
+    await userEvent.click(client);
+    await expect.element(client).toHaveAttribute("aria-expanded", "true");
+    const group = header("Atlas");
+    await expect.element(group).toHaveAttribute("aria-expanded", "false");
+    // Its count covers both repositories' threads.
+    expect(group.element().textContent).toMatch(/Atlas3$/);
+    await expect.element(screen.getByRole("button", { name: /^Web/ })).not.toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 4", { exact: true }).first())
+      .not.toBeInTheDocument();
+
+    await userEvent.click(group);
+    await expect.element(group).toHaveAttribute("aria-expanded", "true");
+    const webFolder = screen.getByRole("button", { name: /^Web/ });
+    await expect.element(webFolder).toBeInTheDocument();
+    await expect.element(screen.getByRole("button", { name: /^Site/ })).toBeInTheDocument();
+    await expect.element(screen.getByText("Thread 6", { exact: true }).first()).toBeInTheDocument();
+
+    await act(() => webFolder.element().focus());
+    await userEvent.keyboard("{ArrowLeft}");
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.element(group).toHaveFocus();
+    // Closing the group leaves its threads out of the jump targets below.
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.element(group).toHaveAttribute("aria-expanded", "false");
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.element(client).toHaveFocus();
+
+    using _timers = fakeTimers();
+    const modifier = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+    const before = vi.mocked(SortableThreadRow).mock.calls.length;
+    await userEvent.keyboard(`{${modifier}>}`);
+    await act(() => vi.advanceTimersByTime(THREAD_JUMP_HINT_SHOW_DELAY_MS));
+    const jumpable = new Set(
+      vi
+        .mocked(SortableThreadRow)
+        .mock.calls.slice(before)
+        .filter(([props]) => props.jumpLabel !== null)
+        .map(([props]) => props.thread.id),
+    );
+    await userEvent.keyboard(`{/${modifier}}`);
+    expect(jumpable).toEqual(new Set(["thread-0", "thread-3"]));
+  });
+
+  it("shows a filtered project's folder without its client header", async () => {
+    using stack = new DisposableStack();
+    const { app } = setupClientFolders(stack);
+    useUiStateStore.setState({ sidebarProjectScopeKeys: [derivePhysicalProjectKey(app)] });
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    await expect.element(screen.getByRole("button", { name: /^Acme · App/ })).toBeInTheDocument();
+    await expect.element(screen.getByText("Thread 1", { exact: true }).first()).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-client-folder").all()).toHaveLength(0);
   });
 });

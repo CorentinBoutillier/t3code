@@ -14,14 +14,14 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-const FOLDER_DOT_CLASS_NAME = {
+export const FOLDER_DOT_CLASS_NAME = {
   attention: "bg-warning",
   failed: "bg-error",
   unread: "bg-success",
   working: "bg-info",
 } as const;
 
-const FOLDER_DOT_LABEL = {
+export const FOLDER_DOT_LABEL = {
   attention: msg(", needs you", { $context: "project folder status, read after its name" }),
   failed: msg(", failed", { $context: "project folder status, read after its name" }),
   unread: msg(", done", { $context: "project folder status, read after its name" }),
@@ -49,6 +49,9 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
     position: { x: number; y: number },
     source: ContextMenuSource,
   ) => void;
+  label?: string | undefined;
+  navigationParent?: string | undefined;
+  depth?: 0 | 1 | 2 | undefined;
 }) {
   const gt = useGT();
   const m = useMessages();
@@ -71,11 +74,15 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
   return (
     <li
       data-testid="sidebar-project-folder"
-      className="group/project-folder relative mt-2 list-none first:mt-0"
+      className={cn(
+        "group/project-folder relative list-none",
+        props.navigationParent === undefined && "mt-2 first:mt-0",
+      )}
     >
       <button
         type="button"
         data-sidebar-row={rowId}
+        data-sidebar-parent={props.navigationParent}
         aria-expanded={!collapsed}
         onClick={() => props.onToggle(group)}
         onContextMenu={(event) => {
@@ -86,11 +93,15 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
             contextMenuSourceOf(event),
           );
         }}
-        className="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-(--sidebar-row-content-inset) text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className={cn(
+          "flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-(--control-radius) px-(--sidebar-row-content-inset) text-left outline-none hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          props.depth === 1 && "ps-9",
+          props.depth === 2 && "ps-15.5",
+        )}
       >
         <ProjectFavicon project={group} className="size-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-sidebar-foreground/90">
-          {group.displayName}
+          {props.label ?? group.displayName}
         </span>
         {dot ? (
           <span className={cn("size-1.5 shrink-0 rounded-full", FOLDER_DOT_CLASS_NAME[dot])}>

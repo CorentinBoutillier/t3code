@@ -284,6 +284,12 @@ import {
   SidebarProjectFolderHeader,
   sidebarFolderRowId,
 } from "./sidebar/SidebarProjectFolderHeader";
+import { SidebarClientFolderHeader } from "./sidebar/SidebarClientFolderHeader";
+import {
+  buildSidebarFolderRows,
+  CLIENT_FOLDERS_ENABLED_KEY,
+  sidebarFolderRowThreads,
+} from "./sidebar/clientFolders";
 import {
   SidebarDragBoundary,
   SidebarSectionHeader,
@@ -443,6 +449,8 @@ function useSidebarThreads(input: {
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
   // Keeps folders with no active threads, so a project the user filtered to or pinned can start one.
   readonly keepEmptyFolders: (group: SidebarProjectSnapshot) => boolean;
+  // A filtered folder shows as it is, not behind a closed client header.
+  readonly projectFilterActive: boolean;
 }) {
   const {
     projectScopeKey,
@@ -456,6 +464,7 @@ function useSidebarThreads(input: {
     departingThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
+    projectFilterActive,
   } = input;
   const shelfRouteThreadKey = routeRowThreadKey === departingThreadKey ? null : routeRowThreadKey;
   // Folders already separate the work, so boring mode has no Working shelf.
@@ -483,6 +492,10 @@ function useSidebarThreads(input: {
     false,
     Schema.Boolean,
   );
+  const [clientFoldersEnabled] = useLocalStorage(CLIENT_FOLDERS_ENABLED_KEY, false, Schema.Boolean);
+  // Client folders sort by name unless the user arranges projects by hand.
+  const clientFoldersAlphabetical =
+    useClientSettings((s) => s.sidebarProjectSortOrder) !== "manual";
   // Shared with the old per-project sidebar, so folders keep their open state.
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const setProjectExpanded = useUiStateStore((store) => store.setProjectExpanded);
@@ -562,11 +575,19 @@ function useSidebarThreads(input: {
               : EMPTY_THREADS,
           };
         });
+  const folderRows =
+    projectFolders === null
+      ? null
+      : buildSidebarFolderRows({
+          folders: projectFolders,
+          groupByClient: clientFoldersEnabled && !projectFilterActive,
+          alphabetical: clientFoldersAlphabetical,
+          expandedById: projectExpandedById,
+          isRouteThread: (thread) => threadShellKey(thread) === routeRowThreadKey,
+        });
   const orderedThreads = [
     ...pinnedThreads,
-    ...(projectFolders === null
-      ? activeThreads
-      : projectFolders.flatMap((folder) => folder.threads)),
+    ...(folderRows === null ? activeThreads : folderRows.flatMap(sidebarFolderRowThreads)),
     ...visibleWorkingThreads,
     ...visibleSnoozedThreads,
     ...renderedSettledThreads,
@@ -608,10 +629,13 @@ function useSidebarThreads(input: {
     workingShelfExpanded,
     toggleWorkingShelf: () => setWorkingShelfExpanded((value) => !value),
     projectFolders,
+    folderRows,
     toggleProjectFolder: (group: SidebarProjectSnapshot) => {
       const keys = sidebarFolderExpansionKeys(group);
       setProjectExpanded(keys, !resolveProjectExpanded(projectExpandedById, keys));
     },
+    toggleClientFolder: (rowId: string) =>
+      setProjectExpanded(rowId, projectExpandedById[rowId] !== true),
     renderedSettledThreads,
     visibleSnoozedThreads,
     visibleWorkingThreads,
@@ -1356,7 +1380,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     workingShelfExpanded,
     toggleWorkingShelf,
     projectFolders,
+    folderRows,
     toggleProjectFolder,
+    toggleClientFolder,
     renderedSettledThreads,
     visibleSnoozedThreads,
     visibleWorkingThreads,
@@ -1387,6 +1413,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       : null,
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
+    projectFilterActive: scopedProjectGroups.length > 0,
   });
 
   // Ranked across environments as the palette ranks them, so one
@@ -2059,6 +2086,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     sidebarListItemsKey,
     projectFolders
       ?.map((folder) => `${folder.group.projectKey}:${folder.threads.length}`)
+      .join("\n") ?? "",
+    folderRows
+      ?.flatMap((row) =>
+        row.kind === "client"
+          ? [`${row.rowId}:${row.collapsed}:${row.threads.map(threadShellKey).join(",")}`]
+          : [],
+      )
       .join("\n") ?? "",
     visibleDraftSessionCount,
     routeDraftIdForRows ?? "",
@@ -3516,6 +3550,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         section: SidebarSection,
                         // The tree row of the project folder this row sits in.
                         folderRow?: string,
+                        depth: 0 | 1 | 2 = 0,
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
@@ -3549,6 +3584,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 ? `shelf:${section}`
                                 : undefined)
                             }
+                            depth={depth}
                             variantAction={
                               section === "snoozed"
                                 ? "unsnooze"
@@ -3652,8 +3688,27 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
                           continue;
                         }
-                        if (projectFolders !== null && item.marker === "active-placeholder") {
-                          for (const folder of projectFolders) {
+                        if (folderRows !== null && item.marker === "active-placeholder") {
+                          for (const row of folderRows) {
+                            if (row.kind === "client") {
+                              items.push(
+                                <SidebarClientFolderHeader
+                                  key={`client-folder:${row.rowId}`}
+                                  rowId={row.rowId}
+                                  name={row.name}
+                                  logo={row.logo}
+                                  collapsed={row.collapsed}
+                                  hiddenThreads={row.hiddenThreads}
+                                  onToggle={toggleClientFolder}
+                                  navigationParent={row.parent}
+                                />,
+                              );
+                              for (const thread of row.threads) {
+                                items.push(renderThreadRow(thread, "active", row.rowId, row.depth));
+                              }
+                              continue;
+                            }
+                            const { folder } = row;
                             items.push(
                               <SidebarProjectFolderHeader
                                 key={`project-folder:${folder.group.projectKey}`}
@@ -3663,6 +3718,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 onToggle={toggleProjectFolder}
                                 onNewThread={startThreadInProjectFolder}
                                 onContextMenu={handleProjectFolderContextMenu}
+                                label={row.label}
+                                navigationParent={row.parent}
+                                depth={row.depth}
                               />,
                             );
                             for (const thread of folder.threads) {
@@ -3671,6 +3729,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                   thread,
                                   "active",
                                   sidebarFolderRowId(folder.group.projectKey),
+                                  row.depth,
                                 ),
                               );
                             }
