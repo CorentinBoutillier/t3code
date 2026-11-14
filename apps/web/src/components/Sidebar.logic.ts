@@ -609,6 +609,41 @@ export function filterSidebarV2VisibleThreads<
   );
 }
 
+/**
+ * Unscoped threads of the pinned, active and working sections: neither settled nor snoozed.
+ * As the partition does, a dragged thread reads in the section it was dropped on, and a thread
+ * settles or snoozes only once its environment's config loaded.
+ */
+export function filterSidebarLiveThreads<
+  T extends Pick<
+    SidebarThreadSummary,
+    "archivedAt" | "environmentId" | "id" | "lineage" | "settledOverride"
+  > &
+    ThreadSnoozeShell & { projectId: string },
+>(input: {
+  readonly threads: readonly T[];
+  readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly serverConfigs: ReadonlyMap<string, unknown>;
+  readonly drop: { readonly key: string; readonly section: "pinned" | "active" | "settled" } | null;
+  readonly now: string;
+}): T[] {
+  const { drop, serverConfigs, now } = input;
+  return filterSidebarV2VisibleThreads(input.threads, null, input.delegatedUnderParent).filter(
+    (thread) => {
+      if (
+        drop !== null &&
+        drop.key === scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
+      ) {
+        return drop.section !== "settled";
+      }
+      return (
+        !serverConfigs.has(thread.environmentId) ||
+        (thread.settledOverride !== "settled" && !effectiveSnoozed(thread, { now }))
+      );
+    },
+  );
+}
+
 export function buildBulkTitleRegenerationContextMenuItem(input: {
   supportedCount: number;
   actionableCount: number;

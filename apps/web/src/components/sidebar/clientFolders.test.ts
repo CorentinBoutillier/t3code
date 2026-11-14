@@ -7,6 +7,7 @@ import {
   buildSidebarFolderRows,
   buildSidebarFolderSettled,
   groupSidebarFoldersByClient,
+  isSidebarFolderShown,
   sidebarClientFolderLevels,
   sidebarClientRailThreads,
   sidebarFolderRowOrder,
@@ -15,6 +16,7 @@ import {
   sidebarOrderRefAtLevel,
   sidebarFolderSettledRowId,
   splitClientPrefix,
+  sidebarThreadProjectRefs,
   splitSettledThreadsByFolder,
   type SidebarFolderSettled,
 } from "./clientFolders";
@@ -60,6 +62,7 @@ function folder(
     readonly projectIcon?: ProjectIconOverride;
     readonly faviconPath?: string;
     readonly archived?: boolean;
+    readonly pinned?: boolean;
     readonly title?: string;
     readonly settled?: SidebarFolderSettled<string>;
     readonly projectKey?: string;
@@ -72,6 +75,7 @@ function folder(
       memberProjectRefs: [{ environmentId: "local", projectId: displayName }],
       title: options.title ?? displayName,
       archived: options.archived ?? false,
+      pinned: options.pinned ?? false,
       projectIcon: options.projectIcon ?? null,
       faviconPath: options.faviconPath ?? null,
     },
@@ -566,6 +570,68 @@ describe("buildSidebarClientRailEntries", () => {
   });
 });
 
+describe("pinned or active projects only", () => {
+  const groups = [
+    folder("Acme · App", [], { pinned: true }),
+    folder("Acme · Infra"),
+    folder("Globex · Portal"),
+    folder("Initech"),
+    folder("Hooli", [], { pinned: true }),
+    folder("Contoso", [], { pinned: true, archived: true }),
+  ].map((entry) => entry.group);
+  const thread = (projectId: string, id = projectId) => ({
+    environmentId: "local",
+    projectId,
+    id,
+  });
+
+  it("shows a folder whose project is pinned or has an active thread", () => {
+    const live = sidebarThreadProjectRefs([thread("Initech"), thread("Initech", "i2")]);
+    expect(live).toEqual(new Set(["local:Initech"]));
+    expect(groups.map((group) => isSidebarFolderShown(group, live))).toEqual([
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+    ]);
+  });
+
+  it("lists in the rail only the clients with a shown project, keeping all their projects", () => {
+    const rail = (activeProjects: readonly string[]) => {
+      const live = sidebarThreadProjectRefs(activeProjects.map((projectId) => thread(projectId)));
+      return buildSidebarClientRailEntries({
+        groups,
+        alphabetical: false,
+        isShown: (group) => isSidebarFolderShown(group, live),
+      });
+    };
+    const entries = rail([]);
+    expect(entries.map((entry) => entry.id)).toEqual(["client:Acme", "project:Hooli"]);
+    // Picking the client still scopes to every one of its projects, shown or not.
+    expect(entries[0]?.groups).toEqual([groups[0], groups[1]]);
+    expect(rail(["Globex · Portal", "Initech"]).map((entry) => entry.id)).toEqual([
+      "client:Acme",
+      "client:Globex",
+      "project:Initech",
+      "project:Hooli",
+    ]);
+  });
+
+  it("hands a hidden folder's settled threads to the shelf", () => {
+    const live = sidebarThreadProjectRefs([]);
+    const settledThreads = [thread("Acme · App", "a1"), thread("Acme · Infra", "f1")];
+    const split = splitSettledThreadsByFolder({
+      groups: groups.filter((group) => isSidebarFolderShown(group, live)),
+      settledThreads,
+      unloadedCount: () => 0,
+    });
+    expect([...split.byProjectKey.keys()]).toEqual(["Acme · App"]);
+    expect(split.shelfThreads).toEqual([settledThreads[1]]);
+  });
+});
+
 describe("sidebarClientRailThreads", () => {
   it("hands each entry the threads of all its projects and drops unlisted ones", () => {
     const groups = [folder("Acme · App"), folder("Initech"), folder("Acme · Infra")].map(
@@ -706,6 +772,19 @@ describe("stored order", () => {
       "Infra",
       "App",
     ]);
+  });
+
+  it("keeps a hidden rail entry's stored place for when it returns", () => {
+    const order = { rail: ["project:Initech", "client:Globex", "client:Acme"] };
+    const shown = (hidden: string | null) =>
+      buildSidebarClientRailEntries({
+        groups,
+        alphabetical: true,
+        order,
+        isShown: (group) => !group.displayName.startsWith(hidden ?? "\u0000"),
+      }).map((entry) => entry.name);
+    expect(shown("Globex")).toEqual(["Initech", "Acme"]);
+    expect(shown(null)).toEqual(["Initech", "Globex", "Acme"]);
   });
 
   it("puts entries the order lacks last, in default order, and ignores stale ids", () => {

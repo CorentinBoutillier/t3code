@@ -288,11 +288,13 @@ import {
   buildSidebarFolderRows,
   buildSidebarFolderSettled,
   CLIENT_FOLDERS_ENABLED_KEY,
+  isSidebarFolderShown,
   sidebarFolderRowOrder,
   sidebarFolderRowThreads,
   sidebarFolderSettledRowId,
   sidebarOrderDropLine,
   sidebarOrderRefAtLevel,
+  sidebarThreadProjectRefs,
   splitSettledThreadsByFolder,
 } from "./sidebar/clientFolders";
 import {
@@ -613,12 +615,19 @@ function useSidebarThreads(input: {
           );
     return (thread: EnvironmentThreadShell) => isListedSettledThread(thread.source, frontier);
   };
-  // With client folders, a folder lists its own settled threads and the shelf keeps the rest.
+  // With client folders, a shown folder lists its own settled threads and the shelf keeps the rest.
+  const activeProjectRefs = sidebarThreadProjectRefs([
+    ...pinnedThreads,
+    ...activeThreads,
+    ...workingThreads,
+  ]);
   const folderSettled =
     folderGroups === null || !clientFoldersEnabled
       ? null
       : splitSettledThreadsByFolder({
-          groups: folderGroups,
+          groups: folderGroups.filter(
+            (group) => keepEmpty(group) || isSidebarFolderShown(group, activeProjectRefs),
+          ),
           settledThreads,
           unloadedCount: folderUnloadedSettledCounter({
             threads: partition.visibleThreads,
@@ -674,7 +683,11 @@ function useSidebarThreads(input: {
           activeThreads,
           folderSettled === null
             ? keepEmpty
-            : (group) => keepEmpty(group) || folderSettled.byProjectKey.has(group.projectKey),
+            : // Pinned threads count as active, as on the rail.
+              (group) =>
+                keepEmpty(group) ||
+                isSidebarFolderShown(group, activeProjectRefs) ||
+                folderSettled.byProjectKey.has(group.projectKey),
         ).map((folder) => {
           const collapsed = !resolveProjectExpanded(
             projectExpandedById,
@@ -1311,14 +1324,42 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   // loaded. The stored keys are left alone, so the scope returns with its project.
   // An archived project's scope reads as all projects, matching the menu.
   const scopeGroups = pickableProjectGroups(projectGroups);
+  const threads = useQuietThreadShells();
+  const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
+  const listedThreads =
+    promotingDraftThreadKeys.length === 0
+      ? threads
+      : threads.map((thread) =>
+          promotingDraftThreadKeys.includes(threadShellKey(thread))
+            ? asLaunchingThread(thread)
+            : thread,
+        );
+  // A picked client leaving the rail falls back to All, and its projects leave the filter.
+  const dropHiddenClientFromScope = useStableCallback(
+    (client: { groups: readonly SidebarProjectSnapshot[] }) =>
+      setProjectScopeKeys(
+        persistedProjectScopeKeys.filter(
+          (key) => !client.groups.some((group) => group.projectKey === key),
+        ),
+      ),
+  );
   const {
     entries: clientRailEntries,
+    liveThreads: clientRailLiveThreads,
     selected: chosenClient,
     select: setChosenClientId,
     order: clientFolderOrder,
     moveEntry,
     resetOrder,
-  } = useSidebarClientRail({ boringSidebarEnabled, groups: scopeGroups });
+  } = useSidebarClientRail({
+    boringSidebarEnabled,
+    groups: scopeGroups,
+    threads: listedThreads,
+    delegatedUnderParent,
+    serverConfigs,
+    optimisticDrop,
+    onSelectedHidden: dropHiddenClientFromScope,
+  });
   const moveClientFolderEntry = useStableCallback(moveEntry);
   const resetClientFolderOrder = useStableCallback(resetOrder);
   // The user's filter keeps the projects that stay in view; a new client starts at the top.
@@ -1349,16 +1390,6 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const chosenProjectGroups = scopeGroups.filter((project) =>
     chosenProjectScopeKeys.includes(project.projectKey),
   );
-  const threads = useQuietThreadShells();
-  const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
-  const listedThreads =
-    promotingDraftThreadKeys.length === 0
-      ? threads
-      : threads.map((thread) =>
-          promotingDraftThreadKeys.includes(threadShellKey(thread))
-            ? asLaunchingThread(thread)
-            : thread,
-        );
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
@@ -1648,7 +1679,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           [...scopeGroups, ...projectGroups.filter((project) => project.archived)]
         : sidebarScopeGroups
       : null,
-    keepEmptyFolders: (group) => sidebarScopeGroups.length > 0 || (group.pinned && !group.archived),
+    // A picked client shows its pinned or active folders only; the filter keeps every one.
+    keepEmptyFolders: (group) =>
+      scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
     projectFilterActive: scopedProjectGroups.length > 0,
     clientScoped: selectedClient !== null,
     clientOrder: scopeGroups,
@@ -3404,17 +3437,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       <SidebarChromeHeader isElectron={isElectron} />
       <SidebarClientRailColumn
         rail={
-          clientRailEntries !== null && clientRailEntries.length > 0 ? (
+          // "All" stays while every client is hidden, so the rail does not come and go.
+          clientRailEntries !== null && scopeGroups.length > 0 ? (
             <SidebarClientRail
               entries={clientRailEntries}
               selectedId={selectedClient?.id ?? null}
               onSelect={selectRailClient}
               onMove={moveClientFolderEntry}
               onResetOrder={resetClientFolderOrder}
-              threads={listedThreads}
-              delegatedUnderParent={delegatedUnderParent}
-              serverConfigs={serverConfigs}
-              now={snoozeNow}
+              liveThreads={clientRailLiveThreads}
               routeRowThreadKey={routeRowThreadKey}
             />
           ) : null
