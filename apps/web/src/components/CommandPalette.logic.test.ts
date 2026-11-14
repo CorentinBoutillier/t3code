@@ -90,6 +90,14 @@ describe("reduceCommandPaletteUiState", () => {
     ).toBeNull();
   });
 
+  it("carries the projects a new thread may start in", () => {
+    const state = reduceCommandPaletteUiState(
+      { open: false, mode: "command", openIntent: null, session: 0 },
+      { _tag: "OpenNewThreadIn", projectKeys: ["local:acme-app"] },
+    );
+    expect(state.openIntent).toEqual({ kind: "new-thread-in", projectKeys: ["local:acme-app"] });
+  });
+
   it("keeps the session across mode switches so only intents start the palette over", () => {
     let state: CommandPaletteUiState = {
       open: false,

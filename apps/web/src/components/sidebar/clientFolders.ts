@@ -145,6 +145,24 @@ function sortClientEntriesByName<TFolder extends { readonly group: ClientFolderG
   return [...sorted, ...entries.filter(isArchived)];
 }
 
+// Entries missing from `order`, such as archived folders, keep their place after the rest.
+function sortClientEntriesByOrder<TFolder extends { readonly group: ClientFolderGroup }>(
+  entries: ReturnType<typeof groupSidebarFoldersByClient<TFolder>>,
+  order: readonly ClientFolderGroup[],
+) {
+  const rankByKey = new Map<unknown, number>();
+  for (const [index, group] of order.entries()) {
+    const prefix = clientPrefixOf(group);
+    const key = prefix === null ? group : sidebarClientRowId(prefix.clientName);
+    if (!rankByKey.has(key)) rankByKey.set(key, index);
+  }
+  const rankOf = (entry: (typeof entries)[number]) =>
+    rankByKey.get(
+      entry.kind === "client" ? sidebarClientRowId(entry.clientName) : entry.folder.group,
+    ) ?? order.length;
+  return [...entries].sort((left, right) => rankOf(left) - rankOf(right));
+}
+
 export interface SidebarProjectFolder<TGroup, TThread> {
   readonly group: TGroup;
   readonly collapsed: boolean;
@@ -177,7 +195,12 @@ export type SidebarFolderRow<TGroup, TThread> =
 export function buildSidebarFolderRows<TGroup extends ClientFolderGroup, TThread>(input: {
   readonly folders: ReadonlyArray<SidebarProjectFolder<TGroup, TThread>>;
   readonly groupByClient: boolean;
+  // The rail already names the picked client, so its rows start one level up.
+  readonly withoutClientHeader?: boolean;
   readonly alphabetical?: boolean;
+  // Every project in manual order, shown or not: a client sits where its first one does,
+  // as on the rail, even when that project's folder has nothing to show.
+  readonly clientOrder?: readonly ClientFolderGroup[];
   readonly expandedById: Readonly<Record<string, boolean>>;
   readonly isRouteThread: (thread: TThread) => boolean;
 }): Array<SidebarFolderRow<TGroup, TThread>> {
@@ -214,60 +237,153 @@ export function buildSidebarFolderRows<TGroup extends ClientFolderGroup, TThread
     ];
   };
   const entries = groupSidebarFoldersByClient(input.folders);
-  return (input.alphabetical === true ? sortClientEntriesByName(entries) : entries).flatMap(
-    (entry): Row[] => {
-      if (entry.kind === "project") return [topLevel(entry.folder)];
-      const rowId = sidebarClientRowId(entry.clientName);
-      const repos = entry.members.flatMap((member) =>
-        member.kind === "folder" ? [member] : member.members,
-      );
+  type ClientEntry = Extract<(typeof entries)[number], { kind: "client" }>;
+  const clientRows = (entry: ClientEntry, parent: string | undefined): Row[] => {
+    const depth = parent === undefined ? 0 : 1;
+    return entry.members.flatMap((member): Row[] => {
+      if (member.kind === "folder") {
+        return [{ kind: "project", folder: member.folder, label: member.label, parent, depth }];
+      }
+      const projectRowId = sidebarClientProjectRowId(entry.clientName, member.projectName);
       return header(
         {
           kind: "client",
-          rowId,
-          name: entry.clientName,
-          logo: clientLogoOf(repos.map((repo) => repo.folder.group)),
-          parent: undefined,
-          depth: 0,
+          rowId: projectRowId,
+          name: member.projectName,
+          logo: clientLogoOf(member.members.map((repo) => repo.folder.group)),
+          parent,
+          depth,
         },
-        repos.map((repo) => repo.folder),
+        member.members.map((repo) => repo.folder),
         () =>
-          entry.members.flatMap((member): Row[] => {
-            if (member.kind === "folder") {
-              return [
-                {
-                  kind: "project",
-                  folder: member.folder,
-                  label: member.label,
-                  parent: rowId,
-                  depth: 1,
-                },
-              ];
-            }
-            const projectRowId = sidebarClientProjectRowId(entry.clientName, member.projectName);
-            return header(
-              {
-                kind: "client",
-                rowId: projectRowId,
-                name: member.projectName,
-                logo: clientLogoOf(member.members.map((repo) => repo.folder.group)),
-                parent: rowId,
-                depth: 1,
-              },
-              member.members.map((repo) => repo.folder),
-              () =>
-                member.members.map((repo): Row => ({
-                  kind: "project",
-                  folder: repo.folder,
-                  label: repo.label,
-                  parent: projectRowId,
-                  depth: 2,
-                })),
-            );
-          }),
+          member.members.map((repo): Row => ({
+            kind: "project",
+            folder: repo.folder,
+            label: repo.label,
+            parent: projectRowId,
+            depth: depth === 0 ? 1 : 2,
+          })),
       );
+    });
+  };
+  const ordered =
+    input.alphabetical === true
+      ? sortClientEntriesByName(entries)
+      : input.clientOrder === undefined
+        ? entries
+        : sortClientEntriesByOrder(entries, input.clientOrder);
+  return ordered.flatMap((entry): Row[] => {
+    if (entry.kind === "project") return [topLevel(entry.folder)];
+    if (input.withoutClientHeader === true) return clientRows(entry, undefined);
+    const rowId = sidebarClientRowId(entry.clientName);
+    const repos = entry.members.flatMap((member) =>
+      member.kind === "folder" ? [member] : member.members,
+    );
+    return header(
+      {
+        kind: "client",
+        rowId,
+        name: entry.clientName,
+        logo: clientLogoOf(repos.map((repo) => repo.folder.group)),
+        parent: undefined,
+        depth: 0,
+      },
+      repos.map((repo) => repo.folder),
+      () => clientRows(entry, rowId),
+    );
+  });
+}
+
+export const CLIENT_RAIL_SELECTED_KEY = "t3code:sidebar:client-rail-selected";
+
+export interface SidebarClientRailEntry<TGroup> {
+  // Persisted as the selection: the client's tree row id, or `project:<projectKey>`.
+  readonly id: string;
+  readonly kind: "client" | "project";
+  readonly name: string;
+  readonly logo: TGroup | undefined;
+  // The project groups the sidebar is scoped to while this entry is picked.
+  readonly groups: readonly TGroup[];
+}
+
+/** The rail lists every client, with or without active threads, in the tree's order. */
+export function buildSidebarClientRailEntries<
+  TGroup extends ClientFolderGroup & { readonly projectKey: string },
+>(input: {
+  readonly groups: readonly TGroup[];
+  readonly alphabetical: boolean;
+}): Array<SidebarClientRailEntry<TGroup>> {
+  const entries = groupSidebarFoldersByClient(
+    input.groups.filter((group) => group.archived !== true).map((group) => ({ group })),
+  );
+  return (input.alphabetical ? sortClientEntriesByName(entries) : entries).map(
+    (entry): SidebarClientRailEntry<TGroup> => {
+      if (entry.kind === "project") {
+        const { group } = entry.folder;
+        return {
+          id: `project:${group.projectKey}`,
+          kind: "project",
+          name: group.displayName,
+          logo: group,
+          groups: [group],
+        };
+      }
+      const groups = entry.members.flatMap((member) =>
+        member.kind === "folder"
+          ? [member.folder.group]
+          : member.members.map((repo) => repo.folder.group),
+      );
+      return {
+        id: sidebarClientRowId(entry.clientName),
+        kind: "client",
+        name: entry.clientName,
+        logo: clientLogoOf(groups),
+        groups,
+      };
     },
   );
+}
+
+/**
+ * Each entry's dot threads, by entry id; a thread of no listed project is left out.
+ * The dot reads what the client header folds: pinned threads sit in their own section
+ * and the open thread is already on screen, so neither lights it.
+ */
+export function sidebarClientRailThreads<
+  TGroup extends {
+    readonly memberProjectRefs: ReadonlyArray<{
+      readonly environmentId: string;
+      readonly projectId: string;
+    }>;
+  },
+  TThread extends {
+    readonly environmentId: string;
+    readonly projectId: string;
+    readonly pinnedAt?: string | null | undefined;
+  },
+>(
+  entries: ReadonlyArray<Pick<SidebarClientRailEntry<TGroup>, "id" | "groups">>,
+  threads: readonly TThread[],
+  isRouteThread: (thread: TThread) => boolean = () => false,
+): Map<string, TThread[]> {
+  const entryIdByProject = new Map<string, string>();
+  for (const entry of entries) {
+    for (const group of entry.groups) {
+      for (const ref of group.memberProjectRefs) {
+        entryIdByProject.set(`${ref.environmentId}:${ref.projectId}`, entry.id);
+      }
+    }
+  }
+  const threadsByEntry = new Map<string, TThread[]>();
+  for (const thread of threads) {
+    if (thread.pinnedAt != null || isRouteThread(thread)) continue;
+    const entryId = entryIdByProject.get(`${thread.environmentId}:${thread.projectId}`);
+    if (entryId === undefined) continue;
+    const list = threadsByEntry.get(entryId);
+    if (list === undefined) threadsByEntry.set(entryId, [thread]);
+    else list.push(thread);
+  }
+  return threadsByEntry;
 }
 
 export function sidebarFolderRowThreads<TGroup, TThread>(

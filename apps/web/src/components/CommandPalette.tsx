@@ -312,6 +312,7 @@ function openIntentView(
       return {
         addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
         groups: [{ value: NEW_THREAD_IN_GROUP, label: resolve(msg("Projects")), items: [] }],
+        ...(intent.projectKeys ? { projectKeys: intent.projectKeys } : {}),
       };
     case "change-theme":
       return {
@@ -1891,7 +1892,16 @@ function OpenCommandPaletteDialog(props: {
                 value: NEW_THREAD_IN_GROUP,
                 label: gt("Projects"),
                 // Every project archived and no "No project" home leaves only adding one.
-                items: projectThreadItems.length > 0 ? projectThreadItems : [addProjectAction],
+                items: (() => {
+                  const projectKeys = currentView.projectKeys;
+                  const items =
+                    projectKeys === undefined
+                      ? projectThreadItems
+                      : projectThreadItems.filter((item) =>
+                          projectKeys.some((key) => item.value === `new-thread-in:${key}`),
+                        );
+                  return items.length > 0 ? items : [addProjectAction];
+                })(),
               },
             ]
           : currentView?.groups[0]?.value.startsWith(PORT_FORWARD_GROUP_PREFIX) && portForwardItem

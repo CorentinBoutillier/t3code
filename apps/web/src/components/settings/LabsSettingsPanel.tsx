@@ -302,7 +302,7 @@ function BoringSidebarClientFoldersRow() {
     <SettingsRow
       title="Group folders by client"
       className="px-0 py-2 sm:px-0"
-      description="Nest project folders under a client when the project is named “Client · Project”. Saved on this device."
+      description="Nest project folders under a client when the project is named “Client · Project”, and list clients in a rail beside the sidebar. Saved on this device."
       control={
         <Switch
           checked={enabled}
