@@ -92,6 +92,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 import { type AnyRouter, useRouter } from "@tanstack/react-router";
 
 import {
@@ -229,7 +230,7 @@ import {
   createSidebarSortingStrategy,
   restrictBelowSidebarLabel,
 } from "./Sidebar.drag";
-import { SidebarPointerSensor } from "./Sidebar.pointer";
+import { SIDEBAR_DRAG_DISTANCE, SidebarPointerSensor } from "./Sidebar.pointer";
 import { createSidebarListMotion } from "./Sidebar.motion";
 import { createSidebarShiftGuard } from "./Sidebar.shiftGuard";
 import {
@@ -295,10 +296,26 @@ import {
   buildSidebarFolderRows,
   buildSidebarFolderSettled,
   CLIENT_FOLDERS_ENABLED_KEY,
+  sidebarFolderRowOrder,
   sidebarFolderRowThreads,
   sidebarFolderSettledRowId,
+  sidebarOrderDropLine,
+  sidebarOrderRefAtLevel,
   splitSettledThreadsByFolder,
 } from "./sidebar/clientFolders";
+import {
+  resolveSidebarOrderDrop,
+  SIDEBAR_RAIL_ORDER_LEVEL,
+  stepSidebarOrderDrop,
+  type SidebarClientFolderOrder,
+  type SidebarOrderDrop,
+  type SidebarOrderRef,
+} from "./sidebar/clientFolderOrder";
+import {
+  SidebarOrderDropLine,
+  sidebarOrderRefOf,
+  withSidebarOrderCollisions,
+} from "./sidebar/clientFolderOrderDrag";
 import {
   SidebarFolderSettledHeader,
   SidebarFolderSettledMore,
@@ -495,6 +512,8 @@ function useSidebarThreads(input: {
   readonly clientScoped: boolean;
   // Every pickable project, in order: a client sits where the rail puts it.
   readonly clientOrder: readonly SidebarProjectSnapshot[];
+  // The user's order of clients, projects and repositories; undefined while client folders are off.
+  readonly clientFolderOrder: SidebarClientFolderOrder | undefined;
 }) {
   const {
     projectScopeKey,
@@ -511,6 +530,7 @@ function useSidebarThreads(input: {
     projectFilterActive,
     clientScoped,
     clientOrder,
+    clientFolderOrder,
   } = input;
   const shelfRouteThreadKey = routeRowThreadKey === departingThreadKey ? null : routeRowThreadKey;
   // Folders already separate the work, so boring mode has no Working shelf.
@@ -709,6 +729,7 @@ function useSidebarThreads(input: {
           withoutClientHeader: clientScoped,
           alphabetical: clientFoldersAlphabetical,
           clientOrder,
+          order: clientFolderOrder,
           expandedById: projectExpandedById,
           isRouteThread: (thread) => threadShellKey(thread) === routeRowThreadKey,
           isSettledRouteThread: (thread) => threadShellKey(thread) === shelfRouteThreadKey,
@@ -1110,8 +1131,6 @@ function checkThreadOperations(
   return false;
 }
 
-const SIDEBAR_DRAG_DISTANCE = 6;
-
 // dnd-kit's 20% edge zone at full speed runs the list away while the pointer rests near the bottom.
 const SIDEBAR_AUTO_SCROLL: AutoScrollOptions = { threshold: { x: 0, y: 0.05 }, acceleration: 3 };
 
@@ -1284,6 +1303,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   } | null>(null);
   const dragSensorRef = useRef<SidebarPointerSensor | null>(null);
   const contextDragKeyRef = useRef<string | null>(null);
+  const [folderOrderDrag, setFolderOrderDrag] = useState<
+    (SidebarOrderRef & { readonly drop: SidebarOrderDrop | null }) | null
+  >(null);
   const dragScrollRef = useRef<{ readonly viewport: Element; readonly top: number } | null>(null);
   const [actionSweep, setActionSweep] = useState<{
     action: SidebarSweepAction;
@@ -1314,7 +1336,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     entries: clientRailEntries,
     selected: chosenClient,
     select: setChosenClientId,
+    order: clientFolderOrder,
+    moveEntry,
+    resetOrder,
   } = useSidebarClientRail({ boringSidebarEnabled, groups: scopeGroups });
+  const moveClientFolderEntry = useStableCallback(moveEntry);
+  const resetClientFolderOrder = useStableCallback(resetOrder);
   // The user's filter keeps the projects that stay in view; a new client starts at the top.
   const selectRailClient = useStableCallback((id: string | null) => {
     if (id === (chosenClient?.id ?? null)) return;
@@ -1448,6 +1475,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   });
   const scopedProjectGroups = revealWidensFilter ? [] : chosenProjectGroups;
   const selectedClient = revealWidensClient ? null : chosenClient;
+  // The level top rows reorder in; null when rows are not grouped by client.
+  const folderOrderRootLevel =
+    clientRailEntries === null || scopedProjectGroups.length > 0
+      ? null
+      : selectedClient === null
+        ? SIDEBAR_RAIL_ORDER_LEVEL
+        : selectedClient.kind === "client"
+          ? selectedClient.id
+          : null;
   // A picked client scopes every section; the filter, when set, wins inside it.
   const sidebarScopeGroups =
     scopedProjectGroups.length > 0 ? scopedProjectGroups : (selectedClient?.groups ?? []);
@@ -1644,6 +1680,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectFilterActive: scopedProjectGroups.length > 0,
     clientScoped: selectedClient !== null,
     clientOrder: scopeGroups,
+    clientFolderOrder,
   });
 
   // Ranked across environments as the palette ranks them, so one
@@ -1999,8 +2036,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       }
     })();
   };
+  // A header's parent is its own row, not the list, so the pins bound means nothing to it.
   const restrictBelowPins: Modifier = (args) =>
-    restrictBelowSidebarLabel(args, dragLabelOffsetRef.current);
+    sidebarOrderRefOf(args.active) !== null
+      ? args.transform
+      : restrictBelowSidebarLabel(args, dragLabelOffsetRef.current);
   const dndModifiers = [
     restrictToVerticalAxis,
     restrictBelowPins,
@@ -2049,6 +2089,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     if (started) {
       listMotionRef.current?.release();
       setDragState(null);
+      setFolderOrderDrag(null);
     }
   };
   const attachDragSensor = (sensor: SidebarPointerSensor) => {
@@ -2078,6 +2119,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     if (scroll && scroll.viewport.scrollTop !== scroll.top) scroll.viewport.scrollTop = scroll.top;
   };
   const moveThreadContextDrag = (point: { x: number; y: number }) => {
+    // A header drag only reorders; dnd-kit runs onDragStart before the first move.
+    if (contextDragKeyRef.current === null) return false;
     // Search results cannot reorder, so their context preview starts inside the list.
     const contextDrag = searchResultsListRef.current !== null || pointerOutsideThreadList(point);
     setDragState((current) =>
@@ -2097,6 +2140,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     return true;
   };
   const dropThreadContextDrag = (point: { x: number; y: number }) => {
+    if (contextDragKeyRef.current === null) return false;
     if (!pointerOutsideThreadList(point)) return false;
     restoreDragScroll();
     dropThreadContext(point, contextDragThreads());
@@ -2219,6 +2263,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   };
 
   const handleThreadDragStart = (event: DragStartEvent) => {
+    const orderRef = sidebarOrderRefOf(event.active);
+    if (orderRef !== null) {
+      dragLabelOffsetRef.current = 0;
+      listMotionRef.current?.suspend();
+      setFolderOrderDrag({ ...orderRef, drop: null });
+      return;
+    }
     const activeKey = String(event.active.id);
     contextDragKeyRef.current = activeKey;
     const activeSection = sectionByThreadKey.get(activeKey);
@@ -2325,10 +2376,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       )
       .join("\n") ?? "",
     folderRows
-      ?.flatMap((row) =>
+      ?.map((row) =>
         row.kind === "client"
-          ? [`${row.rowId}:${row.collapsed}:${row.threads.map(threadShellKey).join(",")}`]
-          : [],
+          ? `${row.rowId}:${row.collapsed}:${row.threads.map(threadShellKey).join(",")}`
+          : `p:${row.folder.group.projectKey}`,
       )
       .join("\n") ?? "",
     visibleDraftSessionCount,
@@ -2350,7 +2401,59 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     previousShelfExpansionKeyRef.current = shelfExpansionKey;
     listMotionRef.current?.update(listMotionPass.animate && shelvesUnchanged);
   }, [listMotionPass, shelfExpansionKey]);
+  // The shown siblings of a level: a drag or a step resolves among these. A step past a sibling
+  // passes the level's hidden entries between them too (see stepSidebarOrderDrop).
+  const folderOrderSiblings = (level: string) =>
+    (folderRows ?? []).flatMap((row) => {
+      const ref = sidebarFolderRowOrder(row, folderOrderRootLevel);
+      return ref?.level === level ? [ref.id] : [];
+    });
+  // A hit inside an open sibling block (one of its folders) stands for that sibling.
+  const folderOrderDropOf = (event: DragOverEvent | DragEndEvent) => {
+    const active = sidebarOrderRefOf(event.active);
+    const hit = sidebarOrderRefOf(event.over);
+    if (active === null) return null;
+    const over =
+      hit === null
+        ? null
+        : sidebarOrderRefAtLevel({
+            rows: folderRows ?? [],
+            rootLevel: folderOrderRootLevel,
+            over: hit,
+            level: active.level,
+          });
+    return {
+      ...active,
+      drop:
+        over === null
+          ? null
+          : resolveSidebarOrderDrop({
+              siblings: folderOrderSiblings(active.level),
+              activeId: active.id,
+              overId: over.id,
+            }),
+    };
+  };
+  const stepFolderOrder = useStableCallback(
+    (ref: SidebarOrderRef, direction: -1 | 1, row: HTMLElement) => {
+      const drop = stepSidebarOrderDrop({
+        siblings: folderOrderSiblings(ref.level),
+        activeId: ref.id,
+        direction,
+      });
+      if (drop === null) return;
+      // The moved row re-mounts under its key, which blurs it; commit first, then refocus.
+      flushSync(() => moveClientFolderEntry(ref.level, ref.id, drop));
+      row.scrollIntoView({ block: "nearest" });
+      row.focus({ preventScroll: true });
+    },
+  );
   const handleThreadDragOver = (event: DragOverEvent) => {
+    const orderDrag = folderOrderDropOf(event);
+    if (orderDrag !== null) {
+      setFolderOrderDrag(orderDrag);
+      return;
+    }
     const target = event.over
       ? resolveSidebarDropTarget(sidebarListItems, String(event.active.id), String(event.over.id))
       : null;
@@ -2420,6 +2523,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     );
   })();
   const handleThreadDragEnd = (event: DragEndEvent) => {
+    const orderDrag = folderOrderDropOf(event);
+    if (orderDrag !== null) {
+      if (orderDrag.drop !== null)
+        moveClientFolderEntry(orderDrag.level, orderDrag.id, orderDrag.drop);
+      return;
+    }
     if (projectFolders !== null) return;
     const activeKey = String(event.active.id);
     const activeSection = sectionByThreadKey.get(activeKey);
@@ -3390,6 +3499,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               entries={clientRailEntries}
               selectedId={selectedClient?.id ?? null}
               onSelect={selectRailClient}
+              onMove={moveClientFolderEntry}
+              onResetOrder={resetClientFolderOrder}
               threads={listedThreads}
               delegatedUnderParent={delegatedUnderParent}
               serverConfigs={serverConfigs}
@@ -3808,8 +3919,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               >
                 <DndContext
                   sensors={dndSensors}
-                  autoScroll={isContextDrag ? false : SIDEBAR_AUTO_SCROLL}
-                  collisionDetection={dndCollisionDetection}
+                  autoScroll={
+                    folderOrderDrag !== null || !isContextDrag ? SIDEBAR_AUTO_SCROLL : false
+                  }
+                  collisionDetection={
+                    folderOrderRootLevel === null
+                      ? dndCollisionDetection
+                      : withSidebarOrderCollisions(dndCollisionDetection)
+                  }
                   modifiers={dndModifiers}
                   onDragStart={handleThreadDragStart}
                   onDragOver={handleThreadDragOver}
@@ -3985,7 +4102,28 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             continue;
                           }
                           if (folderRows !== null && item.marker === "active-placeholder") {
-                            for (const row of folderRows) {
+                            const dropLine =
+                              folderOrderDrag?.drop == null
+                                ? null
+                                : sidebarOrderDropLine({
+                                    rows: folderRows,
+                                    rootLevel: folderOrderRootLevel,
+                                    level: folderOrderDrag.level,
+                                    drop: folderOrderDrag.drop,
+                                  });
+                            const dropLineItem =
+                              dropLine === null ? null : (
+                                <SidebarOrderDropLine
+                                  key="order-drop-line"
+                                  depth={dropLine.depth}
+                                />
+                              );
+                            for (const [rowIndex, row] of folderRows.entries()) {
+                              if (rowIndex === dropLine?.index) items.push(dropLineItem);
+                              const orderLevel = sidebarFolderRowOrder(
+                                row,
+                                folderOrderRootLevel,
+                              )?.level;
                               if (row.kind === "client") {
                                 items.push(
                                   <SidebarClientFolderHeader
@@ -3997,6 +4135,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                     hiddenThreads={row.hiddenThreads}
                                     onToggle={toggleClientFolder}
                                     navigationParent={row.parent}
+                                    orderLevel={orderLevel}
+                                    onOrderStep={stepFolderOrder}
                                   />,
                                 );
                                 for (const thread of row.threads) {
@@ -4026,6 +4166,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                   label={row.label}
                                   navigationParent={row.parent}
                                   depth={row.depth}
+                                  orderLevel={orderLevel}
+                                  onOrderStep={stepFolderOrder}
                                 />,
                               );
                               const folderRowId = sidebarFolderRowId(folder.group.projectKey);
@@ -4082,6 +4224,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                                 );
                               }
                             }
+                            if (dropLine?.index === folderRows.length) items.push(dropLineItem);
                             continue;
                           }
                           switch (item.marker) {

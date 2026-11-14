@@ -1,13 +1,18 @@
 import type { ProjectIconOverride } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import { moveSidebarOrderEntry, stepSidebarOrderDrop } from "./clientFolderOrder";
 import {
   buildSidebarClientRailEntries,
   buildSidebarFolderRows,
   buildSidebarFolderSettled,
   groupSidebarFoldersByClient,
+  sidebarClientFolderLevels,
   sidebarClientRailThreads,
+  sidebarFolderRowOrder,
   sidebarFolderRowThreads,
+  sidebarOrderDropLine,
+  sidebarOrderRefAtLevel,
   sidebarFolderSettledRowId,
   splitClientPrefix,
   splitSettledThreadsByFolder,
@@ -57,12 +62,13 @@ function folder(
     readonly archived?: boolean;
     readonly title?: string;
     readonly settled?: SidebarFolderSettled<string>;
+    readonly projectKey?: string;
   } = {},
 ) {
   return {
     group: {
       displayName,
-      projectKey: displayName,
+      projectKey: options.projectKey ?? displayName,
       memberProjectRefs: [{ environmentId: "local", projectId: displayName }],
       title: options.title ?? displayName,
       archived: options.archived ?? false,
@@ -625,5 +631,303 @@ describe("sidebarClientRailThreads dot input", () => {
     expect(sidebarClientRailThreads(entries, threads, (thread) => thread.id === "open")).toEqual(
       new Map([["client:Acme", [threads[2]]]]),
     );
+  });
+});
+
+describe("stored order", () => {
+  const atlasId = 'client-project:["Acme","Atlas"]';
+  const folders = [
+    folder("Acme · App"),
+    folder("Acme · Infra"),
+    folder("Acme · Atlas · Web"),
+    folder("Acme · Atlas · Site"),
+    folder("Globex · Portal"),
+    folder("Initech"),
+  ];
+  const groups = folders.map((entry) => entry.group);
+  const allOpen = { "client:Acme": true, "client:Globex": true, [atlasId]: true };
+  const nameOf = (row: ReturnType<typeof buildSidebarFolderRows<FolderGroup, string>>[number]) =>
+    row.kind === "client" ? row.name : (row.label ?? row.folder.group.displayName);
+  type FolderGroup = (typeof groups)[number];
+  const rows = (
+    input: {
+      readonly order?: Record<string, readonly string[]>;
+      readonly alphabetical?: boolean;
+      readonly folders?: typeof folders;
+      readonly withoutClientHeader?: boolean;
+    } = {},
+  ) =>
+    buildSidebarFolderRows({
+      folders: input.folders ?? folders,
+      groupByClient: true,
+      alphabetical: input.alphabetical ?? true,
+      withoutClientHeader: input.withoutClientHeader ?? false,
+      expandedById: allOpen,
+      isRouteThread: () => false,
+      ...(input.order === undefined ? {} : { order: input.order }),
+    }).map(nameOf);
+  const rail = (order: Record<string, readonly string[]>, from = groups) =>
+    buildSidebarClientRailEntries({ groups: from, alphabetical: true, order }).map(
+      (entry) => entry.name,
+    );
+
+  it("changes nothing while no order is stored, in both sort modes", () => {
+    expect(rows({ order: {} })).toEqual(rows());
+    expect(rows({ order: {}, alphabetical: false })).toEqual(rows({ alphabetical: false }));
+    expect(rows()).toEqual([
+      "Acme",
+      "App",
+      "Atlas",
+      "Site",
+      "Web",
+      "Infra",
+      "Globex",
+      "Portal",
+      "Initech",
+    ]);
+  });
+
+  it("applies one stored order to the rail, the All view and a picked client", () => {
+    const order = {
+      rail: ["project:Initech", "client:Globex", "client:Acme"],
+      "client:Acme": [atlasId, "project:Acme · Infra", "project:Acme · App"],
+    };
+    expect(rail(order)).toEqual(["Initech", "Globex", "Acme"]);
+    expect(rows({ order })).toEqual([
+      "Initech",
+      "Globex",
+      "Portal",
+      "Acme",
+      "Atlas",
+      "Site",
+      "Web",
+      "Infra",
+      "App",
+    ]);
+    expect(rows({ order, folders: folders.slice(0, 4), withoutClientHeader: true })).toEqual([
+      "Atlas",
+      "Site",
+      "Web",
+      "Infra",
+      "App",
+    ]);
+  });
+
+  it("puts entries the order lacks last, in default order, and ignores stale ids", () => {
+    const order = {
+      rail: ["gone", "client:Globex"],
+      "client:Acme": ["project:Acme · Infra", "project:Old"],
+    };
+    expect(rail(order)).toEqual(["Globex", "Acme", "Initech"]);
+    expect(rows({ order })).toEqual([
+      "Globex",
+      "Portal",
+      "Acme",
+      "Infra",
+      "App",
+      "Atlas",
+      "Site",
+      "Web",
+      "Initech",
+    ]);
+  });
+
+  it("orders each level on its own", () => {
+    const order = {
+      rail: ["project:Initech", "client:Acme"],
+      [atlasId]: ["project:Acme · Atlas · Web", "project:Acme · Atlas · Site"],
+    };
+    expect(rows({ order })).toEqual([
+      "Initech",
+      "Acme",
+      "App",
+      "Atlas",
+      "Web",
+      "Site",
+      "Infra",
+      "Globex",
+      "Portal",
+    ]);
+  });
+
+  it("keeps a renamed repository's place and sends a renamed client last", () => {
+    const order = {
+      rail: ["project:Initech", "client:Acme", "client:Globex"],
+      "client:Acme": ["project:Acme · Infra", "project:Acme · App"],
+    };
+    const renamed = [
+      folder("Acme · Platform", [], { projectKey: "Acme · Infra" }),
+      ...folders.filter((entry) => entry.group.displayName !== "Acme · Infra"),
+    ];
+    expect(rows({ order, folders: renamed }).slice(0, 4)).toEqual([
+      "Initech",
+      "Acme",
+      "Platform",
+      "App",
+    ]);
+    const corp = folders.map((entry) =>
+      entry.group.displayName.startsWith("Acme · ")
+        ? folder(entry.group.displayName.replace("Acme", "Acme Corp"), [], {
+            projectKey: entry.group.projectKey,
+          })
+        : entry,
+    );
+    expect(
+      rail(
+        order,
+        corp.map((entry) => entry.group),
+      ),
+    ).toEqual(["Initech", "Globex", "Acme Corp"]);
+  });
+
+  it("keeps an archived folder last even when its id is stored", () => {
+    const archived = [...folders, folder("Vandelay", [], { archived: true })];
+    expect(
+      rows({ order: { rail: ["project:Vandelay", "project:Initech"] }, folders: archived }),
+    ).toEqual([
+      "Initech",
+      "Acme",
+      "App",
+      "Atlas",
+      "Site",
+      "Web",
+      "Infra",
+      "Globex",
+      "Portal",
+      "Vandelay",
+    ]);
+  });
+});
+
+describe("sidebarClientFolderLevels", () => {
+  it("lists every level from all open projects, shown or not", () => {
+    const groups = [
+      folder("Globex · Portal"),
+      folder("Acme · Atlas · Web"),
+      folder("Acme · App"),
+      folder("Initech"),
+      folder("Vandelay", [], { archived: true }),
+    ].map((entry) => entry.group);
+    expect(
+      sidebarClientFolderLevels({
+        groups,
+        alphabetical: true,
+        order: { rail: ["project:Initech"] },
+      }),
+    ).toEqual(
+      new Map([
+        ["rail", ["project:Initech", "client:Acme", "client:Globex"]],
+        ["client:Acme", ["project:Acme · App", 'client-project:["Acme","Atlas"]']],
+        ['client-project:["Acme","Atlas"]', ["project:Acme · Atlas · Web"]],
+        ["client:Globex", ["project:Globex · Portal"]],
+      ]),
+    );
+  });
+});
+
+describe("sidebarFolderRowOrder and sidebarOrderDropLine", () => {
+  const atlasId = 'client-project:["Acme","Atlas"]';
+  const build = (withoutClientHeader: boolean) =>
+    buildSidebarFolderRows({
+      folders: [
+        folder("Acme · App"),
+        folder("Acme · Atlas · Web"),
+        folder("Globex · Portal"),
+        folder("Vandelay", [], { archived: true }),
+      ],
+      groupByClient: true,
+      alphabetical: true,
+      withoutClientHeader,
+      expandedById: { "client:Acme": true, [atlasId]: true },
+      isRouteThread: () => false,
+    });
+  const rows = build(false);
+
+  it("reorders a row within its parent, or the rail or picked client at the top", () => {
+    expect(rows.map((row) => sidebarFolderRowOrder(row, "rail"))).toEqual([
+      { level: "rail", id: "client:Acme" },
+      { level: "client:Acme", id: "project:Acme · App" },
+      { level: "client:Acme", id: atlasId },
+      { level: atlasId, id: "project:Acme · Atlas · Web" },
+      { level: "rail", id: "client:Globex" },
+      null,
+    ]);
+    expect(sidebarFolderRowOrder(build(true)[0]!, "client:Acme")).toEqual({
+      level: "client:Acme",
+      id: "project:Acme · App",
+    });
+    expect(sidebarFolderRowOrder(rows[0]!, null)).toBeNull();
+  });
+
+  it("draws the line before the target, or after its open block", () => {
+    const line = (id: string, position: "before" | "after", level = "rail") =>
+      sidebarOrderDropLine({ rows, rootLevel: "rail", level, drop: { targetId: id, position } });
+    expect(line("client:Globex", "before")).toEqual({ index: 4, depth: 0 });
+    expect(line("client:Acme", "after")).toEqual({ index: 4, depth: 0 });
+    expect(line(atlasId, "before", "client:Acme")).toEqual({ index: 2, depth: 1 });
+    expect(line("project:Acme · App", "after", "client:Acme")).toEqual({ index: 2, depth: 1 });
+    const shown = rows.slice(0, 5);
+    expect(
+      sidebarOrderDropLine({
+        rows: shown,
+        rootLevel: "rail",
+        level: "rail",
+        drop: { targetId: "client:Globex", position: "after" },
+      }),
+    ).toEqual({ index: shown.length, depth: 0 });
+    expect(line("client:Hooli", "after")).toBeNull();
+  });
+});
+
+describe("sidebarOrderRefAtLevel", () => {
+  const atlasId = 'client-project:["Acme","Atlas"]';
+  const rows = buildSidebarFolderRows({
+    folders: [folder("Acme · App"), folder("Acme · Atlas · Web"), folder("Globex · Portal")],
+    groupByClient: true,
+    alphabetical: true,
+    expandedById: { "client:Acme": true, [atlasId]: true, "client:Globex": true },
+    isRouteThread: () => false,
+  });
+  const at = (over: { level: string; id: string }, level: string) =>
+    sidebarOrderRefAtLevel({ rows, rootLevel: "rail", over, level });
+
+  it("reads a hit inside an open block as that block's entry, and nothing outside it", () => {
+    const web = { level: atlasId, id: "project:Acme · Atlas · Web" };
+    expect(at(web, atlasId)).toEqual(web);
+    expect(at(web, "client:Acme")).toEqual({ level: "client:Acme", id: atlasId });
+    expect(at(web, "rail")).toEqual({ level: "rail", id: "client:Acme" });
+    expect(at({ level: "client:Globex", id: "project:Globex · Portal" }, "rail")).toEqual({
+      level: "rail",
+      id: "client:Globex",
+    });
+    expect(at({ level: "client:Globex", id: "project:Globex · Portal" }, "client:Acme")).toBe(null);
+    expect(at({ level: "rail", id: "client:Globex" }, "client:Acme")).toBeNull();
+  });
+});
+
+describe("a step on a level the tree shows only in part", () => {
+  it("passes the hidden entries between the two shown rows, and moves nothing else", () => {
+    const groups = [folder("Acme · App"), folder("Globex · Portal"), folder("Initech · Web")].map(
+      (entry) => entry.group,
+    );
+    // The tree hides Globex (no active thread); the rail lists all three.
+    const drop = stepSidebarOrderDrop({
+      siblings: ["client:Acme", "client:Initech"],
+      activeId: "client:Acme",
+      direction: 1,
+    });
+    expect(drop).toEqual({ targetId: "client:Initech", position: "after" });
+    const order = moveSidebarOrderEntry({
+      order: {},
+      level: "rail",
+      present: sidebarClientFolderLevels({ groups, alphabetical: true, order: {} }).get("rail")!,
+      activeId: "client:Acme",
+      drop: drop!,
+    });
+    expect(
+      buildSidebarClientRailEntries({ groups, alphabetical: true, order }).map(
+        (entry) => entry.name,
+      ),
+    ).toEqual(["Globex", "Initech", "Acme"]);
   });
 });

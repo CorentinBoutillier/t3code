@@ -7,6 +7,12 @@ import { memo } from "react";
 
 import { cn } from "~/lib/utils";
 import { contextMenuSourceOf } from "../../contextMenuSource";
+import { sidebarRepositoryOrderId, type SidebarOrderRef } from "./clientFolderOrder";
+import {
+  NO_SIDEBAR_ORDER_ROW,
+  SidebarOrderRow,
+  type SidebarOrderRowState,
+} from "./clientFolderOrderDrag";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useUiStateStore } from "../../uiStateStore";
 import { resolveSidebarFolderDot, resolveThreadLastVisitedAt } from "../Sidebar.logic";
@@ -51,6 +57,9 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
   ) => void;
   label?: string | undefined;
   navigationParent?: string | undefined;
+  // Set when the row can be reordered among its siblings: the level it moves within.
+  orderLevel?: string | undefined;
+  onOrderStep?: ((ref: SidebarOrderRef, direction: -1 | 1, row: HTMLElement) => void) | undefined;
   depth?: 0 | 1 | 2 | undefined;
 }) {
   const gt = useGT();
@@ -71,16 +80,18 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
         })),
       )
     : null;
-  return (
+  const renderRow = (order: SidebarOrderRowState) => (
     <li
       data-testid="sidebar-project-folder"
       className={cn(
         "group/project-folder relative list-none",
         props.navigationParent === undefined && "mt-2 first:mt-0",
+        order.isDragging && "opacity-50",
       )}
     >
       <button
         type="button"
+        {...order.rowProps}
         data-sidebar-row={rowId}
         data-sidebar-parent={props.navigationParent}
         aria-expanded={!collapsed}
@@ -145,5 +156,17 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
         </Tooltip>
       </span>
     </li>
+  );
+  const { orderLevel } = props;
+  return orderLevel === undefined ? (
+    renderRow(NO_SIDEBAR_ORDER_ROW)
+  ) : (
+    <SidebarOrderRow
+      level={orderLevel}
+      id={sidebarRepositoryOrderId(group.projectKey)}
+      onStep={props.onOrderStep}
+    >
+      {renderRow}
+    </SidebarOrderRow>
   );
 });

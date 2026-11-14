@@ -1,5 +1,14 @@
 import type { ProjectIconOverride } from "@t3tools/contracts";
 
+import { orderItemsByPreferredIds } from "../Sidebar.logic";
+import {
+  SIDEBAR_RAIL_ORDER_LEVEL,
+  sidebarRepositoryOrderId,
+  type SidebarClientFolderOrder,
+  type SidebarOrderDrop,
+  type SidebarOrderRef,
+} from "./clientFolderOrder";
+
 export const CLIENT_FOLDERS_ENABLED_KEY = "t3code:sidebar:client-folders";
 const CLIENT_SEPARATOR = " · ";
 
@@ -30,6 +39,8 @@ function sidebarClientRowId(client: string) {
 function sidebarClientProjectRowId(client: string, project: string) {
   return `client-project:${JSON.stringify([client, project])}`;
 }
+
+type OrderedFolder = { readonly group: ClientFolderGroup & { readonly projectKey: string } };
 
 interface ClientFolderGroup {
   readonly displayName: string;
@@ -163,6 +174,78 @@ function sortClientEntriesByOrder<TFolder extends { readonly group: ClientFolder
   return [...entries].sort((left, right) => rankOf(left) - rankOf(right));
 }
 
+type ClientEntries<TFolder extends { readonly group: ClientFolderGroup }> = ReturnType<
+  typeof groupSidebarFoldersByClient<TFolder>
+>;
+
+function clientEntryOrderId(entry: ClientEntries<OrderedFolder>[number]) {
+  return entry.kind === "client"
+    ? sidebarClientRowId(entry.clientName)
+    : sidebarRepositoryOrderId(entry.folder.group.projectKey);
+}
+
+function clientMemberOrderId(
+  clientName: string,
+  member: Extract<ClientEntries<OrderedFolder>[number], { kind: "client" }>["members"][number],
+) {
+  return member.kind === "folder"
+    ? sidebarRepositoryOrderId(member.folder.group.projectKey)
+    : sidebarClientProjectRowId(clientName, member.projectName);
+}
+
+// Each level follows its stored ids; the rest keep their place after them, archived folders last.
+function sortClientEntriesByStoredOrder<TFolder extends OrderedFolder>(
+  entries: ClientEntries<TFolder>,
+  order: SidebarClientFolderOrder,
+): ClientEntries<TFolder> {
+  type Entry = (typeof entries)[number];
+  const isArchived = (entry: Entry) =>
+    entry.kind === "project" && entry.folder.group.archived === true;
+  const top = orderItemsByPreferredIds({
+    items: entries.filter((entry) => !isArchived(entry)),
+    preferredIds: order[SIDEBAR_RAIL_ORDER_LEVEL] ?? [],
+    getId: clientEntryOrderId,
+  }).map((entry): Entry => {
+    if (entry.kind === "project") return entry;
+    const clientRowId = sidebarClientRowId(entry.clientName);
+    const members = orderItemsByPreferredIds({
+      items: entry.members,
+      preferredIds: order[clientRowId] ?? [],
+      getId: (member) => clientMemberOrderId(entry.clientName, member),
+    }).map((member) => {
+      if (member.kind === "folder") return member;
+      const projectRowId = sidebarClientProjectRowId(entry.clientName, member.projectName);
+      return {
+        ...member,
+        members: orderItemsByPreferredIds({
+          items: member.members,
+          preferredIds: order[projectRowId] ?? [],
+          getId: (repo) => sidebarRepositoryOrderId(repo.folder.group.projectKey),
+        }),
+      };
+    });
+    return { ...entry, members };
+  });
+  return [...top, ...entries.filter(isArchived)];
+}
+
+function orderClientEntries<TFolder extends OrderedFolder>(
+  entries: ClientEntries<TFolder>,
+  input: {
+    readonly alphabetical?: boolean | undefined;
+    readonly clientOrder?: readonly ClientFolderGroup[] | undefined;
+    readonly order?: SidebarClientFolderOrder | undefined;
+  },
+) {
+  const sorted =
+    input.alphabetical === true
+      ? sortClientEntriesByName(entries)
+      : input.clientOrder === undefined
+        ? entries
+        : sortClientEntriesByOrder(entries, input.clientOrder);
+  return input.order === undefined ? sorted : sortClientEntriesByStoredOrder(sorted, input.order);
+}
+
 /** The folder's "Settled · n" row in the sidebar tree, and its key in `projectExpandedById`. */
 export function sidebarFolderSettledRowId(projectKey: string) {
   return `folder-settled:${projectKey}`;
@@ -292,7 +375,10 @@ export type SidebarFolderRow<TGroup, TThread> =
     };
 
 /** The folder rows the sidebar draws, in order. Headers are closed unless `expandedById` says open. */
-export function buildSidebarFolderRows<TGroup extends ClientFolderGroup, TThread>(input: {
+export function buildSidebarFolderRows<
+  TGroup extends ClientFolderGroup & { readonly projectKey: string },
+  TThread,
+>(input: {
   readonly folders: ReadonlyArray<SidebarProjectFolder<TGroup, TThread>>;
   readonly groupByClient: boolean;
   // The rail already names the picked client, so its rows start one level up.
@@ -301,6 +387,7 @@ export function buildSidebarFolderRows<TGroup extends ClientFolderGroup, TThread
   // Every project in manual order, shown or not: a client sits where its first one does,
   // as on the rail, even when that project's folder has nothing to show.
   readonly clientOrder?: readonly ClientFolderGroup[];
+  readonly order?: SidebarClientFolderOrder | undefined;
   readonly expandedById: Readonly<Record<string, boolean>>;
   readonly isRouteThread: (thread: TThread) => boolean;
   /** Excludes a departing route thread, so settling it does not lift it under a closed client. */
@@ -374,13 +461,7 @@ export function buildSidebarFolderRows<TGroup extends ClientFolderGroup, TThread
       );
     });
   };
-  const ordered =
-    input.alphabetical === true
-      ? sortClientEntriesByName(entries)
-      : input.clientOrder === undefined
-        ? entries
-        : sortClientEntriesByOrder(entries, input.clientOrder);
-  return ordered.flatMap((entry): Row[] => {
+  return orderClientEntries(entries, input).flatMap((entry): Row[] => {
     if (entry.kind === "project") return [topLevel(entry.folder)];
     if (input.withoutClientHeader === true) return clientRows(entry, undefined);
     const rowId = sidebarClientRowId(entry.clientName);
@@ -414,42 +495,51 @@ export interface SidebarClientRailEntry<TGroup> {
   readonly groups: readonly TGroup[];
 }
 
+function openClientEntries<
+  TGroup extends ClientFolderGroup & { readonly projectKey: string },
+>(input: {
+  readonly groups: readonly TGroup[];
+  readonly alphabetical: boolean;
+  readonly order?: SidebarClientFolderOrder | undefined;
+}) {
+  const entries = groupSidebarFoldersByClient(
+    input.groups.filter((group) => group.archived !== true).map((group) => ({ group })),
+  );
+  return orderClientEntries(entries, { alphabetical: input.alphabetical, order: input.order });
+}
+
 /** The rail lists every client, with or without active threads, in the tree's order. */
 export function buildSidebarClientRailEntries<
   TGroup extends ClientFolderGroup & { readonly projectKey: string },
 >(input: {
   readonly groups: readonly TGroup[];
   readonly alphabetical: boolean;
+  readonly order?: SidebarClientFolderOrder | undefined;
 }): Array<SidebarClientRailEntry<TGroup>> {
-  const entries = groupSidebarFoldersByClient(
-    input.groups.filter((group) => group.archived !== true).map((group) => ({ group })),
-  );
-  return (input.alphabetical ? sortClientEntriesByName(entries) : entries).map(
-    (entry): SidebarClientRailEntry<TGroup> => {
-      if (entry.kind === "project") {
-        const { group } = entry.folder;
-        return {
-          id: `project:${group.projectKey}`,
-          kind: "project",
-          name: group.displayName,
-          logo: group,
-          groups: [group],
-        };
-      }
-      const groups = entry.members.flatMap((member) =>
-        member.kind === "folder"
-          ? [member.folder.group]
-          : member.members.map((repo) => repo.folder.group),
-      );
+  return openClientEntries(input).map((entry): SidebarClientRailEntry<TGroup> => {
+    if (entry.kind === "project") {
+      const { group } = entry.folder;
       return {
-        id: sidebarClientRowId(entry.clientName),
-        kind: "client",
-        name: entry.clientName,
-        logo: clientLogoOf(groups),
-        groups,
+        id: sidebarRepositoryOrderId(group.projectKey),
+        kind: "project",
+        name: group.displayName,
+        logo: group,
+        groups: [group],
       };
-    },
-  );
+    }
+    const groups = entry.members.flatMap((member) =>
+      member.kind === "folder"
+        ? [member.folder.group]
+        : member.members.map((repo) => repo.folder.group),
+    );
+    return {
+      id: sidebarClientRowId(entry.clientName),
+      kind: "client",
+      name: entry.clientName,
+      logo: clientLogoOf(groups),
+      groups,
+    };
+  });
 }
 
 /**
@@ -500,4 +590,86 @@ export function sidebarFolderRowThreads<TGroup, TThread>(
   if (row.kind === "client") return row.threads;
   const settled = row.folder.settled?.threads ?? NO_THREADS;
   return settled.length === 0 ? row.folder.threads : [...row.folder.threads, ...settled];
+}
+
+/** Every level's entry ids in the order shown, from all open projects: what a move rewrites. */
+export function sidebarClientFolderLevels<
+  TGroup extends ClientFolderGroup & { readonly projectKey: string },
+>(input: {
+  readonly groups: readonly TGroup[];
+  readonly alphabetical: boolean;
+  readonly order: SidebarClientFolderOrder;
+}): Map<string, string[]> {
+  const entries = openClientEntries(input);
+  const levels = new Map<string, string[]>([
+    [SIDEBAR_RAIL_ORDER_LEVEL, entries.map(clientEntryOrderId)],
+  ]);
+  for (const entry of entries) {
+    if (entry.kind === "project") continue;
+    levels.set(
+      sidebarClientRowId(entry.clientName),
+      entry.members.map((member) => clientMemberOrderId(entry.clientName, member)),
+    );
+    for (const member of entry.members) {
+      if (member.kind === "folder") continue;
+      levels.set(
+        sidebarClientProjectRowId(entry.clientName, member.projectName),
+        member.members.map((repo) => sidebarRepositoryOrderId(repo.folder.group.projectKey)),
+      );
+    }
+  }
+  return levels;
+}
+
+type OrderRowGroup = { readonly projectKey: string; readonly archived?: boolean | undefined };
+
+/** The level and id a row reorders under; null for an archived folder or ungrouped rows. */
+export function sidebarFolderRowOrder<TGroup extends OrderRowGroup, TThread>(
+  row: SidebarFolderRow<TGroup, TThread>,
+  rootLevel: string | null,
+): SidebarOrderRef | null {
+  const level = row.parent ?? rootLevel;
+  if (level === null) return null;
+  if (row.kind === "client") return { level, id: row.rowId };
+  if (row.folder.group.archived === true) return null;
+  return { level, id: sidebarRepositoryOrderId(row.folder.group.projectKey) };
+}
+
+/**
+ * The entry of `level` that a hit on `over` stands for: `over` itself, or the open client or
+ * project group whose block it sits in; null when no such entry encloses it.
+ */
+export function sidebarOrderRefAtLevel<TGroup extends OrderRowGroup, TThread>(input: {
+  readonly rows: ReadonlyArray<SidebarFolderRow<TGroup, TThread>>;
+  readonly rootLevel: string | null;
+  readonly over: SidebarOrderRef;
+  readonly level: string;
+}): SidebarOrderRef | null {
+  let ref: SidebarOrderRef | null = input.over;
+  // A parent sits one depth up, so the walk ends within the tree's three levels.
+  for (let depth = 0; ref !== null && ref.level !== input.level && depth < 3; depth += 1) {
+    const parentRowId: string = ref.level;
+    const parent = input.rows.find((row) => row.kind === "client" && row.rowId === parentRowId);
+    ref = parent === undefined ? null : sidebarFolderRowOrder(parent, input.rootLevel);
+  }
+  return ref?.level === input.level ? ref : null;
+}
+
+/** The row the drop line is drawn before (`rows.length` is after the last), and its indent. */
+export function sidebarOrderDropLine<TGroup extends OrderRowGroup, TThread>(input: {
+  readonly rows: ReadonlyArray<SidebarFolderRow<TGroup, TThread>>;
+  readonly rootLevel: string | null;
+  readonly level: string;
+  readonly drop: SidebarOrderDrop;
+}): { readonly index: number; readonly depth: 0 | 1 | 2 } | null {
+  const { rows, drop } = input;
+  const index = rows.findIndex((row) => {
+    const ref = sidebarFolderRowOrder(row, input.rootLevel);
+    return ref?.level === input.level && ref.id === drop.targetId;
+  });
+  const target = rows[index];
+  if (target === undefined) return null;
+  if (drop.position === "before") return { index, depth: target.depth };
+  const end = rows.findIndex((row, at) => at > index && row.depth <= target.depth);
+  return { index: end === -1 ? rows.length : end, depth: target.depth };
 }

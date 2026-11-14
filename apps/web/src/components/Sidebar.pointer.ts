@@ -2,6 +2,9 @@ import { type PointerEvent as ReactPointerEvent } from "react";
 import { type SensorProps } from "@dnd-kit/core";
 import { getOwnerDocument, getWindow } from "@dnd-kit/utilities";
 
+/** How far the pointer travels before a press becomes a drag, for every sidebar drag. */
+export const SIDEBAR_DRAG_DISTANCE = 6;
+
 type Options = {
   distance: number;
   onAttach: (sensor: SidebarPointerSensor) => void;
