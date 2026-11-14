@@ -5,6 +5,7 @@ import {
   resolveInitialThreadSidebarWidth,
   resolveThreadSidebarMaximumWidth,
   resolveThreadSidebarMinimumWidth,
+  THREAD_SIDEBAR_CLIENT_RAIL_WIDTH,
 } from "./threadSidebarWidth";
 
 function renderedWidth(sidebarWidth: number, viewportWidth: number): number {
@@ -27,5 +28,13 @@ describe("thread sidebar width", () => {
     const sidebarWidth = resolveInitialThreadSidebarWidth(null);
     expect(renderedWidth(sidebarWidth, 840)).toBe(208);
     expect(renderedWidth(sidebarWidth, 1638)).toBe(256);
+  });
+});
+
+describe("resolveThreadSidebarMinimumWidth", () => {
+  it("adds the client rail's column so the list keeps its own minimum", () => {
+    expect(resolveThreadSidebarMinimumWidth(0)).toBe(208);
+    expect(resolveThreadSidebarMinimumWidth(0, THREAD_SIDEBAR_CLIENT_RAIL_WIDTH)).toBe(272);
+    expect(resolveThreadSidebarMinimumWidth(300, THREAD_SIDEBAR_CLIENT_RAIL_WIDTH)).toBe(300);
   });
 });

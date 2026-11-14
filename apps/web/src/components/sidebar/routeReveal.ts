@@ -13,6 +13,9 @@ export interface SidebarRouteReveal {
   pendingKey: string | null;
   // A draft's first send names its thread without navigating; the user is not looking for it.
   pendingInPlace?: boolean;
+  // The first route this layout saw, until the route changes: a launch or reload
+  // reopening a thread, not a navigation to it.
+  firstKey?: string | null;
 }
 
 export function pendingSidebarRouteReveal(
@@ -22,6 +25,7 @@ export function pendingSidebarRouteReveal(
 ): string | null {
   if (routeKey === null) return null;
   if (reveal.observedKey !== routeKey) {
+    reveal.firstKey = reveal.observedKey === null ? routeKey : null;
     reveal.observedKey = routeKey;
     reveal.pendingKey = routeKey;
     reveal.pendingInPlace = inPlace;

@@ -11,6 +11,21 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { resolveSidebarFolderDot, resolveThreadLastVisitedAt } from "../Sidebar.logic";
 import { FOLDER_DOT_CLASS_NAME, FOLDER_DOT_LABEL } from "./SidebarProjectFolderHeader";
 
+export function resolveFolderDotWithVisits(
+  threads: readonly EnvironmentThreadShell[],
+  localLastVisitedAtById: Readonly<Record<string, string>>,
+) {
+  return resolveSidebarFolderDot(
+    threads.map((thread) => ({
+      ...thread,
+      lastVisitedAt: resolveThreadLastVisitedAt(
+        thread.lastVisitedAt,
+        localLastVisitedAtById[scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))],
+      ),
+    })),
+  );
+}
+
 /** A client's header in the boring sidebar, or one of its projects': it folds the folders named "Client · …". */
 export const SidebarClientFolderHeader = memo(function SidebarClientFolderHeader(props: {
   rowId: string;
@@ -24,19 +39,7 @@ export const SidebarClientFolderHeader = memo(function SidebarClientFolderHeader
   const m = useMessages();
   const { rowId, collapsed, hiddenThreads } = props;
   const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
-  const dot = collapsed
-    ? resolveSidebarFolderDot(
-        hiddenThreads.map((thread) => ({
-          ...thread,
-          lastVisitedAt: resolveThreadLastVisitedAt(
-            thread.lastVisitedAt,
-            localLastVisitedAtById[
-              scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-            ],
-          ),
-        })),
-      )
-    : null;
+  const dot = collapsed ? resolveFolderDotWithVisits(hiddenThreads, localLastVisitedAtById) : null;
   return (
     <li
       data-testid="sidebar-client-folder"

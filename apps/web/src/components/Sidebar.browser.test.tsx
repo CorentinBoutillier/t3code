@@ -13,7 +13,7 @@ import {
   ThreadId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
-import { isMacPlatform } from "@t3tools/shared/keybindings";
+import { compileResolvedKeybindingsConfig, isMacPlatform } from "@t3tools/shared/keybindings";
 import { derivePhysicalProjectKey } from "@t3tools/client-runtime/state/project-grouping";
 import * as Schema from "effect/Schema";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -42,7 +42,8 @@ import { readLocalApi } from "../localApi";
 import type { Project } from "../types";
 import Sidebar from "./Sidebar";
 import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "./Sidebar.logic";
-import { CLIENT_FOLDERS_ENABLED_KEY } from "./sidebar/clientFolders";
+import { shortcutLabelForCommand } from "../keybindings";
+import { CLIENT_FOLDERS_ENABLED_KEY, CLIENT_RAIL_SELECTED_KEY } from "./sidebar/clientFolders";
 import { SortableThreadRow } from "./sidebar/SidebarThreadRow";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -585,6 +586,13 @@ describe("sidebar settled pagination", () => {
   });
 });
 
+const JUMP_KEYBINDINGS = compileResolvedKeybindingsConfig([
+  { key: "mod+1", command: "thread.jump.1" },
+  { key: "mod+2", command: "thread.jump.2" },
+]);
+const JUMP_1_LABEL = shortcutLabelForCommand(JUMP_KEYBINDINGS, "thread.jump.1");
+const JUMP_2_LABEL = shortcutLabelForCommand(JUMP_KEYBINDINGS, "thread.jump.2");
+
 function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?: boolean } = {}) {
   const previousSettings = getClientSettings();
   stack.defer(() => __setClientSettingsForTests(previousSettings));
@@ -598,6 +606,7 @@ function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?
     }),
   );
   stack.defer(() => removeLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY));
+  stack.defer(() => removeLocalStorageItem(CLIENT_RAIL_SELECTED_KEY));
   setLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY, true, Schema.Boolean);
   // Earlier tests leave the settled shelf open and the local API's context menu stubbed.
   removeLocalStorageItem("t3code:sidebar:settled-expanded");
@@ -635,16 +644,17 @@ function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?
   );
   vi.mocked(useQuietThreadShells).mockReturnValue(threads);
   vi.mocked(useThreadRouteTarget).mockReturnValue({ kind: "server", threadRef: routeThreadRef });
+  const startThread = vi.fn().mockResolvedValue(null);
   vi.mocked(useHandleNewThread).mockReturnValue({
     activeDraftThread: null,
     activeThread: null,
     defaultProjectRef: { environmentId: app.environmentId, projectId: app.id },
     defaultProjectFallbackReady: true,
-    handleNewThread: vi.fn().mockResolvedValue(null),
+    handleNewThread: startThread,
     routeDraftId: null,
     routeThreadRef,
   });
-  return { app };
+  return { app, solo, threads, startThread };
 }
 
 describe("boring sidebar client folders", () => {
@@ -786,5 +796,300 @@ describe("boring sidebar client folders", () => {
     await expect.element(screen.getByRole("button", { name: /^Acme · App/ })).toBeInTheDocument();
     await expect.element(screen.getByText("Thread 1", { exact: true }).first()).toBeInTheDocument();
     expect(screen.getByTestId("sidebar-client-folder").all()).toHaveLength(0);
+  });
+
+  it("scopes folders, pinned threads and jumps to the client picked in the rail", async () => {
+    using stack = new DisposableStack();
+    const { solo, threads } = setupClientFolders(stack, { withProjectGroup: true });
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads,
+      { ...threadShell(solo.id, 7), pinnedAt: "2026-03-09T10:00:00.000Z" },
+    ]);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await expect.element(rail).toBeInTheDocument();
+    const railButtons = rail.getByRole("button");
+    expect(railButtons.all()).toHaveLength(4);
+    // Thread 2's failure shows on Acme whatever the rail scopes the list to.
+    for (const [index, name] of ["All", "Acme, failed", "Northwind", "Zenith"].entries()) {
+      await expect.element(railButtons.nth(index)).toHaveAccessibleName(name);
+    }
+    await expect.element(railButtons.first()).toHaveAttribute("aria-pressed", "true");
+    await expect.element(screen.getByText("Thread 7", { exact: true }).first()).toBeInTheDocument();
+
+    const northwind = rail.getByRole("button", { name: /^Northwind/ });
+    await userEvent.click(northwind);
+    await expect.element(northwind).toHaveAttribute("aria-pressed", "true");
+    for (const hidden of ["Thread 0", "Thread 3", "Thread 7"]) {
+      await expect
+        .element(screen.getByText(hidden, { exact: true }).first())
+        .not.toBeInTheDocument();
+    }
+    const headers = screen.getByTestId("sidebar-client-folder");
+    expect(headers.all()).toHaveLength(1);
+    const group = headers.getByRole("button");
+    await expect.element(group).toHaveAttribute("aria-expanded", "false");
+    expect(group.element().textContent).toMatch(/Atlas3$/);
+
+    await userEvent.click(group);
+    await expect.element(screen.getByRole("button", { name: /^Web/ })).toBeInTheDocument();
+    await expect.element(screen.getByRole("button", { name: /^Site/ })).toBeInTheDocument();
+    for (const shown of ["Thread 4", "Thread 5", "Thread 6"]) {
+      await expect.element(screen.getByText(shown, { exact: true }).first()).toBeInTheDocument();
+    }
+
+    using _timers = fakeTimers();
+    const modifier = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+    const before = vi.mocked(SortableThreadRow).mock.calls.length;
+    await userEvent.keyboard(`{${modifier}>}`);
+    await act(() => vi.advanceTimersByTime(THREAD_JUMP_HINT_SHOW_DELAY_MS));
+    const labelById = new Map(
+      vi
+        .mocked(SortableThreadRow)
+        .mock.calls.slice(before)
+        .filter(([props]) => props.jumpLabel !== null)
+        .map(([props]) => [props.thread.id, props.jumpLabel] as const),
+    );
+    await userEvent.keyboard(`{/${modifier}}`);
+    // The first two visible rows take the first two jumps; a hidden thread takes none.
+    expect([...labelById.values()].toSorted()).toEqual([JUMP_1_LABEL, JUMP_2_LABEL].toSorted());
+    for (const id of labelById.keys()) expect(["thread-4", "thread-5", "thread-6"]).toContain(id);
+  });
+
+  it("keeps the picked client across a remount and returns to All when it is gone", async () => {
+    using stack = new DisposableStack();
+    const { solo, startThread } = setupClientFolders(stack);
+    {
+      await using screen = await render(
+        <SidebarProvider>
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </SidebarProvider>,
+      );
+      const acme = screen.getByTestId("sidebar-client-rail").getByRole("button", { name: /^Acme/ });
+      await userEvent.click(acme);
+      await expect.element(acme).toHaveAttribute("aria-pressed", "true");
+    }
+
+    vi.mocked(openCommandPalette).mockClear();
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await expect
+      .element(rail.getByRole("button", { name: /^Acme/ }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("sidebar-client-folder").all()).toHaveLength(0);
+    await expect.element(screen.getByRole("button", { name: /^App/ })).toBeInTheDocument();
+    await expect.element(screen.getByRole("button", { name: /^Infra/ })).toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 3", { exact: true }).first())
+      .not.toBeInTheDocument();
+
+    // A client with a single project leaves the new thread nothing to pick.
+    await userEvent.click(rail.getByRole("button", { name: /^Zenith/ }));
+    await userEvent.click(screen.getByRole("button", { name: "New thread", exact: true }));
+    expect(startThread).toHaveBeenCalledExactlyOnceWith({
+      environmentId: solo.environmentId,
+      projectId: solo.id,
+    });
+    expect(openCommandPalette).not.toHaveBeenCalled();
+
+    const all = rail.getByRole("button", { name: "All", exact: true });
+    await userEvent.click(all);
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await expect
+      .element(screen.getByTestId("sidebar-client-folder").filter({ hasText: "Acme" }))
+      .toBeInTheDocument();
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+
+    await act(() =>
+      writeLocalStorageValue(
+        CLIENT_RAIL_SELECTED_KEY,
+        "client:Umbrella",
+        null,
+        Schema.NullOr(Schema.String),
+      ),
+    );
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-client-folder").all()).toHaveLength(1);
+  });
+
+  it("keeps the picked client when a reload reopens another client's thread", async () => {
+    using stack = new DisposableStack();
+    const { threads } = setupClientFolders(stack);
+    {
+      await using screen = await render(
+        <SidebarProvider>
+          <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+        </SidebarProvider>,
+      );
+      const zenith = screen
+        .getByTestId("sidebar-client-rail")
+        .getByRole("button", { name: /^Zenith/ });
+      await userEvent.click(zenith);
+      await expect.element(zenith).toHaveAttribute("aria-pressed", "true");
+    }
+
+    // A fresh reveal is a reload, still on the Acme thread.
+    const routeReveal = { observedKey: null, pendingKey: null };
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await expect
+      .element(rail.getByRole("button", { name: /^Zenith/ }))
+      .toHaveAttribute("aria-pressed", "true");
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 0", { exact: true }).first())
+      .not.toBeInTheDocument();
+
+    // Navigating to another client's thread brings the whole tree back.
+    vi.mocked(useThreadRouteTarget).mockReturnValue({
+      kind: "server",
+      threadRef: { environmentId: threads[1]!.environmentId, threadId: threads[1]!.id },
+    });
+    await screen.rerender(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    await expect
+      .element(rail.getByRole("button", { name: "All", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    await expect.element(screen.getByText("Thread 1", { exact: true }).first()).toBeInTheDocument();
+  });
+
+  it("drops only the filter when a route opens a thread of the picked client", async () => {
+    using stack = new DisposableStack();
+    const { app, threads } = setupClientFolders(stack);
+    const routeReveal = { observedKey: null, pendingKey: null };
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    const acme = rail.getByRole("button", { name: /^Acme/ });
+    await userEvent.click(acme);
+    await act(() =>
+      useUiStateStore.setState({ sidebarProjectScopeKeys: [derivePhysicalProjectKey(app)] }),
+    );
+    await expect
+      .element(screen.getByText("Thread 2", { exact: true }).first())
+      .not.toBeInTheDocument();
+
+    vi.mocked(useThreadRouteTarget).mockReturnValue({
+      kind: "server",
+      threadRef: { environmentId: threads[2]!.environmentId, threadId: threads[2]!.id },
+    });
+    await screen.rerender(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    await expect.element(screen.getByText("Thread 2", { exact: true }).first()).toBeInTheDocument();
+    await expect.element(acme).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(() => useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([]);
+    await expect
+      .element(screen.getByText("Thread 3", { exact: true }).first())
+      .not.toBeInTheDocument();
+  });
+
+  it("keeps the user's filter when the rail pick still holds its project", async () => {
+    using stack = new DisposableStack();
+    const { app } = setupClientFolders(stack);
+    const appKey = derivePhysicalProjectKey(app);
+    useUiStateStore.setState({ sidebarProjectScopeKeys: [appKey] });
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await userEvent.click(rail.getByRole("button", { name: "All", exact: true }));
+    expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([appKey]);
+    const acme = rail.getByRole("button", { name: /^Acme/ });
+    await userEvent.click(acme);
+    await expect.element(acme).toHaveAttribute("aria-pressed", "true");
+    expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([appKey]);
+    await userEvent.click(acme);
+    expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([appKey]);
+    await expect
+      .element(screen.getByLabelText("Projects: Acme · App", { exact: true }))
+      .toBeInTheDocument();
+
+    await userEvent.click(rail.getByRole("button", { name: /^Zenith/ }));
+    expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([]);
+    await expect
+      .element(screen.getByLabelText("Filter Zenith threads by project", { exact: true }))
+      .toBeInTheDocument();
+  });
+
+  it("offers a multi-project client's projects only to a new thread", async () => {
+    using stack = new DisposableStack();
+    const { app, startThread } = setupClientFolders(stack, { withProjectGroup: true });
+    vi.mocked(useHandleNewThread).mockReturnValue({
+      ...vi.mocked(useHandleNewThread)(),
+      activeThread: makeThreadFixture({
+        environmentId: app.environmentId,
+        id: ThreadId.make("thread-0"),
+        projectId: app.id,
+      }),
+    });
+    vi.mocked(openCommandPalette).mockClear();
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await userEvent.click(rail.getByRole("button", { name: /^Northwind/ }));
+    const newThread = screen.getByRole("button", { name: "New thread", exact: true });
+    await userEvent.click(newThread);
+    await userEvent.click(newThread, { modifiers: ["Shift"] });
+    const northwindPicker = {
+      open: "new-thread-in",
+      projectKeys: ["local:atlas-web", "local:atlas-site"].toSorted(),
+    };
+    const calls = vi.mocked(openCommandPalette).mock.calls.map(([detail]) => ({
+      ...detail,
+      projectKeys: [...(detail?.projectKeys ?? [])].toSorted(),
+    }));
+    // Shift+click would start in the open Acme thread's project: the picker stays in Northwind.
+    expect(calls).toEqual([northwindPicker, northwindPicker]);
+    expect(startThread).not.toHaveBeenCalled();
+  });
+
+  it("gives the rail one Tab stop and moves between clients with the arrows", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const buttons = screen.getByTestId("sidebar-client-rail").getByRole("button");
+    expect(buttons.all().map((button) => button.element().getAttribute("tabindex"))).toEqual([
+      "0",
+      "-1",
+      "-1",
+    ]);
+    await act(() => (buttons.first().element() as HTMLElement).focus());
+    await userEvent.keyboard("{ArrowDown}");
+    await expect.element(buttons.nth(1)).toHaveFocus();
+    await userEvent.keyboard("{End}");
+    await expect.element(buttons.nth(2)).toHaveFocus();
+    await userEvent.keyboard("{ArrowUp}");
+    await expect.element(buttons.nth(1)).toHaveFocus();
   });
 });

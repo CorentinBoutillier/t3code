@@ -3,8 +3,11 @@ const THREAD_SIDEBAR_DEFAULT_WIDTH = 16 * 16;
 const THREAD_SIDEBAR_MIN_WIDTH = 13 * 16;
 export const THREAD_MAIN_CONTENT_MIN_WIDTH = 40 * 16;
 
-export function resolveThreadSidebarMinimumWidth(brandWidth: number): number {
-  return Math.max(THREAD_SIDEBAR_MIN_WIDTH, Math.ceil(brandWidth));
+// The client rail's column (w-16), taken from the list beside it.
+export const THREAD_SIDEBAR_CLIENT_RAIL_WIDTH = 4 * 16;
+
+export function resolveThreadSidebarMinimumWidth(brandWidth: number, railWidth = 0): number {
+  return Math.max(THREAD_SIDEBAR_MIN_WIDTH + railWidth, Math.ceil(brandWidth));
 }
 
 export function resolveThreadSidebarMaximumWidth(

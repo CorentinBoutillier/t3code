@@ -2,8 +2,10 @@ import type { ProjectIconOverride } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  buildSidebarClientRailEntries,
   buildSidebarFolderRows,
   groupSidebarFoldersByClient,
+  sidebarClientRailThreads,
   sidebarFolderRowThreads,
   splitClientPrefix,
 } from "./clientFolders";
@@ -55,6 +57,8 @@ function folder(
   return {
     group: {
       displayName,
+      projectKey: displayName,
+      memberProjectRefs: [{ environmentId: "local", projectId: displayName }],
       title: options.title ?? displayName,
       archived: options.archived ?? false,
       projectIcon: options.projectIcon ?? null,
@@ -93,7 +97,7 @@ describe("groupSidebarFoldersByClient", () => {
         "Acme · App",
         "Umbrella",
         "Acme · Infra",
-        "hooli · Site",
+        "Hooli · Site",
         "Globex · Site",
       ]),
     ).toEqual([
@@ -101,7 +105,7 @@ describe("groupSidebarFoldersByClient", () => {
       "Initech",
       { Acme: ["App", "Infra"] },
       "Umbrella",
-      { hooli: ["Site"] },
+      { Hooli: ["Site"] },
     ]);
     // A project sits where its first repository sat, even with a single one.
     expect(
@@ -356,5 +360,126 @@ describe("buildSidebarFolderRows", () => {
       portal,
     ]);
     expect(openGroup.flatMap(sidebarFolderRowThreads)).toEqual(["s1", "i1", "m1"]);
+
+    // A client picked in the rail lists its groups one level up, under the same row ids.
+    const buildScoped = (expandedById: Record<string, boolean>) =>
+      buildSidebarFolderRows({
+        folders: projectFolders,
+        groupByClient: true,
+        withoutClientHeader: true,
+        expandedById,
+        isRouteThread: (thread) => thread === "s1",
+      });
+    const scopedOrion = { ...orion, parent: undefined, depth: 0 };
+    const scopedPortal = { ...portal, parent: undefined, depth: 0 };
+    const scopedClosed = buildScoped({});
+    expect(scopedClosed).toEqual([
+      { ...scopedOrion, collapsed: true, threads: ["s1"], hiddenThreads: ["s2", "i1"] },
+      scopedPortal,
+    ]);
+    expect(scopedClosed.flatMap(sidebarFolderRowThreads)).toEqual(["s1", "m1"]);
+    const scopedOpen = buildScoped({ [orionId]: true });
+    expect(scopedOpen).toEqual([
+      { ...scopedOrion, collapsed: false, threads: [], hiddenThreads: [] },
+      { kind: "project", folder: projectFolders[0], label: "Rewards", parent: orionId, depth: 1 },
+      { kind: "project", folder: projectFolders[2], label: "Infra", parent: orionId, depth: 1 },
+      scopedPortal,
+    ]);
+    expect(scopedOpen.flatMap(sidebarFolderRowThreads)).toEqual(["s1", "i1", "m1"]);
+  });
+});
+
+describe("buildSidebarClientRailEntries", () => {
+  const groups = [
+    folder("Globex · Portal"),
+    folder("Initech"),
+    folder("Acme · App"),
+    folder("Globex · Orion · Rewards"),
+    folder("Acme · Infra", [], { faviconPath: "/clients/acme/logo.png" }),
+    folder("Acme · Old", [], { archived: true }),
+    folder("Umbrella", [], { archived: true }),
+  ].map((entry) => entry.group);
+
+  it("lists each client once, unprefixed projects on their own, and no archived project", () => {
+    const entries = buildSidebarClientRailEntries({ groups, alphabetical: false });
+    expect(entries.map((entry) => [entry.id, entry.kind, entry.name])).toEqual([
+      ["client:Globex", "client", "Globex"],
+      ["project:Initech", "project", "Initech"],
+      ["client:Acme", "client", "Acme"],
+    ]);
+    expect(entries[0]?.groups).toEqual([groups[0], groups[3]]);
+    expect(entries[1]?.groups).toEqual([groups[1]]);
+    expect(entries[2]?.groups).toEqual([groups[2], groups[4]]);
+    expect(
+      buildSidebarClientRailEntries({ groups, alphabetical: true }).map((entry) => entry.name),
+    ).toEqual(["Acme", "Globex", "Initech"]);
+  });
+
+  it("takes the first icon chosen among a client's projects, else its first project", () => {
+    const entries = buildSidebarClientRailEntries({ groups, alphabetical: false });
+    expect(entries.map((entry) => entry.logo)).toEqual([groups[0], groups[1], groups[4]]);
+  });
+});
+
+describe("sidebarClientRailThreads", () => {
+  it("hands each entry the threads of all its projects and drops unlisted ones", () => {
+    const groups = [folder("Acme · App"), folder("Initech"), folder("Acme · Infra")].map(
+      (entry) => entry.group,
+    );
+    const entries = buildSidebarClientRailEntries({ groups, alphabetical: false });
+    const thread = (projectId: string) => ({ environmentId: "local", projectId });
+    const threads = [
+      thread("Acme · App"),
+      thread("Initech"),
+      thread("Gone"),
+      thread("Acme · Infra"),
+    ];
+    expect(sidebarClientRailThreads(entries, threads)).toEqual(
+      new Map([
+        ["client:Acme", [threads[0], threads[3]]],
+        ["project:Initech", [threads[1]]],
+      ]),
+    );
+  });
+});
+
+describe("client order in manual mode", () => {
+  it("puts a client where the rail does, even when its first project shows no folder", () => {
+    const old = folder("Acme · Old");
+    const zenith = folder("Zenith", ["z1"]);
+    const app = folder("Acme · App", ["a1"]);
+    const groups = [old, zenith, app].map((entry) => entry.group);
+    // The empty "Acme · Old" folder is left out of the tree, as the sidebar drops it.
+    const rows = buildSidebarFolderRows({
+      folders: [zenith, app],
+      groupByClient: true,
+      alphabetical: false,
+      clientOrder: groups,
+      expandedById: {},
+      isRouteThread: () => false,
+    });
+    const treeNames = rows.map((row) =>
+      row.kind === "client" ? row.name : row.folder.group.displayName,
+    );
+    const railNames = buildSidebarClientRailEntries({ groups, alphabetical: false }).map(
+      (entry) => entry.name,
+    );
+    expect(treeNames).toEqual(["Acme", "Zenith"]);
+    expect(railNames).toEqual(treeNames);
+  });
+});
+
+describe("sidebarClientRailThreads dot input", () => {
+  it("leaves out pinned threads and the open thread, as the client header does", () => {
+    const groups = [folder("Acme · App")].map((entry) => entry.group);
+    const entries = buildSidebarClientRailEntries({ groups, alphabetical: false });
+    const threads = [
+      { environmentId: "local", projectId: "Acme · App", id: "open", pinnedAt: null },
+      { environmentId: "local", projectId: "Acme · App", id: "pinned", pinnedAt: "2026-03-09" },
+      { environmentId: "local", projectId: "Acme · App", id: "folded", pinnedAt: null },
+    ];
+    expect(sidebarClientRailThreads(entries, threads, (thread) => thread.id === "open")).toEqual(
+      new Map([["client:Acme", [threads[2]]]]),
+    );
   });
 });
