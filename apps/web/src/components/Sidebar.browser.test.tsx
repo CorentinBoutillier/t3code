@@ -31,6 +31,7 @@ import {
 } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { __setClientSettingsForTests, getClientSettings } from "../hooks/useSettings";
+import { useThreadActions } from "../hooks/useThreadActions";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 import { useProjects, useServerConfigs, useQuietThreadShells } from "../state/entities";
 import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "../state/environments";
@@ -56,6 +57,7 @@ vi.mock("../state/environments", { spy: true });
 vi.mock("../hooks/useHandleNewThread", { spy: true });
 vi.mock("../hooks/useNowMinute", { spy: true });
 vi.mock("../hooks/useThreadRouteTarget", { spy: true });
+vi.mock("../hooks/useThreadActions", { spy: true });
 vi.mock("./sidebar/SidebarThreadRow", { spy: true });
 vi.mock("../state/session", { spy: true });
 vi.mock("../state/use-orchestration-command", { spy: true });
@@ -593,7 +595,21 @@ const JUMP_KEYBINDINGS = compileResolvedKeybindingsConfig([
 const JUMP_1_LABEL = shortcutLabelForCommand(JUMP_KEYBINDINGS, "thread.jump.1");
 const JUMP_2_LABEL = shortcutLabelForCommand(JUMP_KEYBINDINGS, "thread.jump.2");
 
-function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?: boolean } = {}) {
+function settledShell(projectId: ProjectId, index: number, settledAt: string) {
+  return makeThreadFixture({
+    environmentId: EnvironmentId.make("local"),
+    id: ThreadId.make(`thread-${index}`),
+    projectId,
+    title: `Thread ${index}`,
+    settledOverride: "settled",
+    settledAt,
+  });
+}
+
+function setupClientFolders(
+  stack: DisposableStack,
+  options: { withProjectGroup?: boolean; settled?: boolean } = {},
+) {
   const previousSettings = getClientSettings();
   stack.defer(() => __setClientSettingsForTests(previousSettings));
   __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, boringSidebarEnabled: true });
@@ -614,10 +630,19 @@ function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?
   const app = { ...project("acme-app"), title: "Acme · App" };
   const infra = { ...project("acme-infra"), title: "Acme · Infra" };
   // Sorts after Acme, so only the closed client's wiring gives its thread a jump.
-  const solo = { ...project("zenith"), title: "Zenith" };
+  const solo = { ...project("vandelay"), title: "Vandelay" };
   const web = { ...project("atlas-web"), title: "Northwind · Atlas · Web" };
   const site = { ...project("atlas-site"), title: "Northwind · Atlas · Site" };
+  const umbrella = { ...project("umbrella"), title: "Umbrella" };
   const nested = options.withProjectGroup === true;
+  const settled = options.settled === true;
+  // Partitioning settles threads only for an environment whose config has loaded.
+  if (settled) {
+    vi.mocked(useServerConfigs).mockReturnValue(
+      new Map([[EnvironmentId.make("local"), { environment: { capabilities: {} } }]]) as never,
+    );
+    stack.defer(() => vi.mocked(useServerConfigs).mockReset());
+  }
   const threads = [
     threadShell(app.id, 0),
     threadShell(app.id, 1),
@@ -634,14 +659,37 @@ function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?
     },
     threadShell(solo.id, 3),
     ...(nested ? [threadShell(web.id, 4), threadShell(web.id, 5), threadShell(site.id, 6)] : []),
+    ...(settled
+      ? [
+          settledShell(solo.id, 10, "2026-03-01T10:00:00.000Z"),
+          settledShell(solo.id, 11, "2026-03-02T10:00:00.000Z"),
+          {
+            ...settledShell(umbrella.id, 12, "2026-03-03T10:00:00.000Z"),
+            runtime: {
+              status: "failed" as const,
+              activeRunId: null,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              providerName: "Codex",
+              lastError: null,
+              updatedAt: "2026-03-09T10:00:00.000Z",
+            },
+          },
+          settledShell(app.id, 13, "2026-03-04T10:00:00.000Z"),
+          settledShell(ProjectId.make("gone"), 14, "2026-03-05T10:00:00.000Z"),
+        ]
+      : []),
   ];
   const routeThreadRef: ScopedThreadRef = {
     environmentId: app.environmentId,
     threadId: threads[0]!.id,
   };
-  vi.mocked(useProjects).mockReturnValue(
-    nested ? [app, infra, solo, web, site] : [app, infra, solo],
-  );
+  vi.mocked(useProjects).mockReturnValue([
+    app,
+    infra,
+    solo,
+    ...(nested ? [web, site] : []),
+    ...(settled ? [umbrella] : []),
+  ]);
   vi.mocked(useQuietThreadShells).mockReturnValue(threads);
   vi.mocked(useThreadRouteTarget).mockReturnValue({ kind: "server", threadRef: routeThreadRef });
   const startThread = vi.fn().mockResolvedValue(null);
@@ -655,6 +703,30 @@ function setupClientFolders(stack: DisposableStack, options: { withProjectGroup?
     routeThreadRef,
   });
   return { app, solo, threads, startThread };
+}
+
+async function jumpLabelsByThreadId() {
+  using _timers = fakeTimers();
+  const modifier = isMacPlatform(navigator.platform) ? "Meta" : "Control";
+  const before = vi.mocked(SortableThreadRow).mock.calls.length;
+  await userEvent.keyboard(`{${modifier}>}`);
+  await act(() => vi.advanceTimersByTime(THREAD_JUMP_HINT_SHOW_DELAY_MS));
+  const jumpable = new Map(
+    vi
+      .mocked(SortableThreadRow)
+      .mock.calls.slice(before)
+      .filter(([props]) => props.jumpLabel !== null)
+      .map(([props]) => [props.thread.id, props.jumpLabel] as const),
+  );
+  await userEvent.keyboard(`{/${modifier}}`);
+  return jumpable;
+}
+
+function lastRowProps(threadId: string) {
+  return vi
+    .mocked(SortableThreadRow)
+    .mock.calls.map(([props]) => props)
+    .findLast((props) => props.thread.id === threadId);
 }
 
 describe("boring sidebar client folders", () => {
@@ -815,7 +887,7 @@ describe("boring sidebar client folders", () => {
     const railButtons = rail.getByRole("button");
     expect(railButtons.all()).toHaveLength(4);
     // Thread 2's failure shows on Acme whatever the rail scopes the list to.
-    for (const [index, name] of ["All", "Acme, failed", "Northwind", "Zenith"].entries()) {
+    for (const [index, name] of ["All", "Acme, failed", "Northwind", "Vandelay"].entries()) {
       await expect.element(railButtons.nth(index)).toHaveAccessibleName(name);
     }
     await expect.element(railButtons.first()).toHaveAttribute("aria-pressed", "true");
@@ -892,7 +964,7 @@ describe("boring sidebar client folders", () => {
       .not.toBeInTheDocument();
 
     // A client with a single project leaves the new thread nothing to pick.
-    await userEvent.click(rail.getByRole("button", { name: /^Zenith/ }));
+    await userEvent.click(rail.getByRole("button", { name: /^Vandelay/ }));
     await userEvent.click(screen.getByRole("button", { name: "New thread", exact: true }));
     expect(startThread).toHaveBeenCalledExactlyOnceWith({
       environmentId: solo.environmentId,
@@ -930,11 +1002,11 @@ describe("boring sidebar client folders", () => {
           <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
         </SidebarProvider>,
       );
-      const zenith = screen
+      const vandelay = screen
         .getByTestId("sidebar-client-rail")
-        .getByRole("button", { name: /^Zenith/ });
-      await userEvent.click(zenith);
-      await expect.element(zenith).toHaveAttribute("aria-pressed", "true");
+        .getByRole("button", { name: /^Vandelay/ });
+      await userEvent.click(vandelay);
+      await expect.element(vandelay).toHaveAttribute("aria-pressed", "true");
     }
 
     // A fresh reveal is a reload, still on the Acme thread.
@@ -946,7 +1018,7 @@ describe("boring sidebar client folders", () => {
     );
     const rail = screen.getByTestId("sidebar-client-rail");
     await expect
-      .element(rail.getByRole("button", { name: /^Zenith/ }))
+      .element(rail.getByRole("button", { name: /^Vandelay/ }))
       .toHaveAttribute("aria-pressed", "true");
     await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
     await expect
@@ -1028,10 +1100,10 @@ describe("boring sidebar client folders", () => {
       .element(screen.getByLabelText("Projects: Acme · App", { exact: true }))
       .toBeInTheDocument();
 
-    await userEvent.click(rail.getByRole("button", { name: /^Zenith/ }));
+    await userEvent.click(rail.getByRole("button", { name: /^Vandelay/ }));
     expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([]);
     await expect
-      .element(screen.getByLabelText("Filter Zenith threads by project", { exact: true }))
+      .element(screen.getByLabelText("Filter Vandelay threads by project", { exact: true }))
       .toBeInTheDocument();
   });
 
@@ -1091,5 +1163,258 @@ describe("boring sidebar client folders", () => {
     await expect.element(buttons.nth(2)).toHaveFocus();
     await userEvent.keyboard("{ArrowUp}");
     await expect.element(buttons.nth(1)).toHaveFocus();
+  });
+
+  it("lists a folder's settled threads under a closed Settled row and out of the shelf", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { settled: true });
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const vandelaySettled = screen.getByRole("button", { name: "Settled · 2", exact: true });
+    await expect.element(vandelaySettled).toHaveAttribute("aria-expanded", "false");
+    await expect
+      .element(screen.getByText("Thread 10", { exact: true }).first())
+      .not.toBeInTheDocument();
+    // Umbrella has nothing but settled threads, and still shows.
+    await expect
+      .element(
+        screen.getByTestId("sidebar-project-folder").getByRole("button", { name: /^Umbrella/ }),
+      )
+      .toBeInTheDocument();
+    await expect
+      .element(screen.getByRole("button", { name: "Settled · 1", exact: true }))
+      .toBeInTheDocument();
+    // Settled threads light no dot and add to no count.
+    expect(
+      screen.getByTestId("sidebar-client-folder").getByRole("button").element().textContent,
+    ).toBe("AEAcme, failed2");
+    await expect
+      .element(screen.getByTestId("sidebar-client-rail").getByRole("button", { name: /^Umbrella/ }))
+      .toHaveAccessibleName("Umbrella");
+    // Umbrella sorts before Vandelay: a hidden settled row would take jump 2.
+    expect(await jumpLabelsByThreadId()).toEqual(
+      new Map([
+        ["thread-0", JUMP_1_LABEL],
+        ["thread-3", JUMP_2_LABEL],
+      ]),
+    );
+    // A closed folder's dot and count leave its settled threads out, even a failed one.
+    const umbrellaHeader = screen
+      .getByTestId("sidebar-project-folder")
+      .getByRole("button", { name: /^Umbrella/ });
+    await userEvent.click(umbrellaHeader);
+    await expect.element(umbrellaHeader).toHaveAttribute("aria-expanded", "false");
+    expect(umbrellaHeader.element().textContent).not.toMatch(/failed|\d/);
+    await userEvent.click(umbrellaHeader);
+
+    await userEvent.click(vandelaySettled);
+    await expect.element(vandelaySettled).toHaveAttribute("aria-expanded", "true");
+    const folderRows = (title: string) =>
+      screen.getByTestId("sidebar-row-folder").filter({ hasText: title }).all();
+    await expect
+      .element(screen.getByText("Thread 11", { exact: true }).first())
+      .toBeInTheDocument();
+    expect(folderRows("Thread 11")).toHaveLength(1);
+    expect(folderRows("Thread 10")).toHaveLength(1);
+    // Most recently settled first, as on the shelf.
+    expect(
+      folderRows("Thread 1")
+        .map((row) => row.element().textContent)
+        .filter((text) => /Thread 1[01]/.test(text ?? "")),
+    ).toEqual([expect.stringContaining("Thread 11"), expect.stringContaining("Thread 10")]);
+
+    await act(() => vandelaySettled.element().focus());
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect.element(vandelaySettled).toHaveAttribute("aria-expanded", "false");
+    await userEvent.keyboard("{ArrowLeft}");
+    await expect
+      .element(
+        screen.getByTestId("sidebar-project-folder").getByRole("button", { name: /^Vandelay/ }),
+      )
+      .toHaveFocus();
+
+    // Only the thread of no folder stays on the shelf.
+    const shelf = screen.getByTestId("sidebar-settled-shelf-toggle");
+    await expect.element(shelf).toBeInTheDocument();
+    expect(shelf.element().textContent).toMatch(/1$/);
+    await userEvent.click(shelf);
+    await expect
+      .element(screen.getByText("Thread 14", { exact: true }).first())
+      .toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-row-slim").all()).toHaveLength(1);
+
+    await act(() =>
+      writeLocalStorageValue(CLIENT_FOLDERS_ENABLED_KEY, false, false, Schema.Boolean),
+    );
+    await expect.element(screen.getByTestId("sidebar-folder-settled")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(3);
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("sidebar-settled-shelf-toggle").element().textContent).toMatch(
+        /5$/,
+      ),
+    );
+  });
+
+  it("keeps a settled route thread visible and scopes Settled rows to the picked client", async () => {
+    using stack = new DisposableStack();
+    const { threads } = setupClientFolders(stack, { settled: true });
+    const routeThread = threads.find((thread) => thread.id === "thread-10")!;
+    const { useThreadActions: actualThreadActions } = await vi.importActual<
+      typeof import("../hooks/useThreadActions")
+    >("../hooks/useThreadActions");
+    const unsettleThread = vi.fn().mockResolvedValue({ _tag: "Success" });
+    vi.mocked(useThreadActions).mockImplementation(() => ({
+      ...actualThreadActions(),
+      unsettleThread,
+    }));
+    stack.defer(() => vi.mocked(useThreadActions).mockReset());
+    vi.mocked(useThreadRouteTarget).mockReturnValue({
+      kind: "server",
+      threadRef: { environmentId: routeThread.environmentId, threadId: routeThread.id },
+    });
+    const routeReveal = { observedKey: null, pendingKey: null };
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    const vandelaySettled = screen.getByRole("button", { name: "Settled · 2", exact: true });
+    await expect.element(vandelaySettled).toHaveAttribute("aria-expanded", "false");
+    await expect
+      .element(screen.getByText("Thread 10", { exact: true }).first())
+      .toBeInTheDocument();
+    expect(lastRowProps("thread-10")?.variantAction).toBe("unsettle");
+
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await userEvent.click(rail.getByRole("button", { name: /^Vandelay/ }));
+    await expect
+      .element(screen.getByRole("button", { name: "Settled · 1", exact: true }))
+      .not.toBeInTheDocument();
+    await expect.element(vandelaySettled).toBeInTheDocument();
+    await expect.element(screen.getByTestId("sidebar-settled-header")).not.toBeInTheDocument();
+
+    // Hover reveals the control; a direct click is what a hover then click sends.
+    const unsettleButton = screen
+      .getByTestId("sidebar-row-folder")
+      .filter({ hasText: "Thread 10" })
+      .getByRole("button", { name: "Un-settle thread" })
+      .element() as HTMLElement;
+    await act(() => unsettleButton.click());
+    expect(unsettleThread).toHaveBeenCalledWith({
+      environmentId: routeThread.environmentId,
+      threadId: routeThread.id,
+    });
+
+    // Un-settling moves the thread back to its folder's active list.
+    vi.mocked(useQuietThreadShells).mockReturnValue(
+      threads.map((thread) =>
+        thread.id === "thread-10" ? { ...thread, settledOverride: null, settledAt: null } : thread,
+      ),
+    );
+    await screen.rerender(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    await expect
+      .element(screen.getByRole("button", { name: "Settled · 1", exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 10", { exact: true }).first())
+      .toBeInTheDocument();
+    expect(lastRowProps("thread-10")).toMatchObject({
+      variantAction: "settle",
+      navigationParent: expect.stringMatching(/^folder:/),
+    });
+  });
+
+  it("pages a folder's long settled list like the shelf", async () => {
+    using stack = new DisposableStack();
+    const { solo, threads } = setupClientFolders(stack, { settled: true });
+    const many = Array.from({ length: 12 }, (_, index) =>
+      settledShell(
+        solo.id,
+        20 + index,
+        `2026-04-${String(index + 1).padStart(2, "0")}T10:00:00.000Z`,
+      ),
+    );
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads.filter(
+        (thread) => thread.projectId !== solo.id || thread.settledOverride === null,
+      ),
+      ...many,
+    ]);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    const vandelaySettled = screen.getByRole("button", { name: "Settled · 12", exact: true });
+    await userEvent.click(vandelaySettled);
+    await expect
+      .element(screen.getByText("Thread 31", { exact: true }).first())
+      .toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 21", { exact: true }).first())
+      .not.toBeInTheDocument();
+    const more = screen.getByRole("button", { name: "Show 2 more", exact: true });
+    await userEvent.click(more);
+    await expect
+      .element(screen.getByText("Thread 20", { exact: true }).first())
+      .toBeInTheDocument();
+    await expect.element(more).not.toBeInTheDocument();
+
+    // A new scope starts the page over, as the shelf does.
+    await userEvent.click(
+      screen.getByTestId("sidebar-client-rail").getByRole("button", { name: /^Vandelay/ }),
+    );
+    await expect
+      .element(screen.getByText("Thread 20", { exact: true }).first())
+      .not.toBeInTheDocument();
+    await expect.element(more).toBeInTheDocument();
+  });
+
+  // regression: #35522 a folder's pager dropped focus while its next page loaded
+  it("keeps a folder's settled pager focused while its next page loads", async () => {
+    using stack = new DisposableStack();
+    const { solo, threads } = setupClientFolders(stack, { settled: true });
+    let loading = false;
+    const originalShelf = vi.mocked(shelfHooks.useOlderSettledShelf).getMockImplementation()!;
+    using _shelf = vi.spyOn(shelfHooks, "useOlderSettledShelf").mockImplementation((input) => ({
+      ...originalShelf(input),
+      loading,
+      retry: () => {
+        loading = true;
+      },
+    }));
+    const many = Array.from({ length: 40 }, (_, index) =>
+      settledShell(solo.id, 20 + index, `2026-04-01T10:${String(index).padStart(2, "0")}:00.000Z`),
+    );
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads.filter(
+        (thread) => thread.projectId !== solo.id || thread.settledOverride === null,
+      ),
+      ...many,
+    ]);
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Settled · 40", exact: true }));
+    const more = screen.getByRole("button", { name: "Show 25 more", exact: true });
+    await expect.element(more).toBeInTheDocument();
+    const moreButton = more.element() as HTMLButtonElement;
+    moreButton.focus();
+    await act(() => moreButton.click());
+    await expect
+      .element(screen.getByRole("button", { name: "Loading", exact: true }))
+      .toHaveFocus();
+    const listedRows = screen.container.querySelectorAll("[data-thread-item]").length;
+    await act(() => moreButton.click());
+    expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(listedRows);
   });
 });

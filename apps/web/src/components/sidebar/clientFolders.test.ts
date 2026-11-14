@@ -4,10 +4,14 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildSidebarClientRailEntries,
   buildSidebarFolderRows,
+  buildSidebarFolderSettled,
   groupSidebarFoldersByClient,
   sidebarClientRailThreads,
   sidebarFolderRowThreads,
+  sidebarFolderSettledRowId,
   splitClientPrefix,
+  splitSettledThreadsByFolder,
+  type SidebarFolderSettled,
 } from "./clientFolders";
 
 describe("splitClientPrefix", () => {
@@ -52,6 +56,7 @@ function folder(
     readonly faviconPath?: string;
     readonly archived?: boolean;
     readonly title?: string;
+    readonly settled?: SidebarFolderSettled<string>;
   } = {},
 ) {
   return {
@@ -67,6 +72,18 @@ function folder(
     collapsed: options.hiddenThreads !== undefined,
     threads,
     hiddenThreads: options.hiddenThreads ?? [],
+    settled: options.settled,
+  };
+}
+
+function settledRow(projectKey: string, threads: readonly string[]): SidebarFolderSettled<string> {
+  return {
+    rowId: sidebarFolderSettledRowId(projectKey),
+    count: threads.length,
+    expanded: false,
+    threads,
+    hiddenCount: 0,
+    loadedThreads: threads,
   };
 }
 
@@ -244,7 +261,7 @@ describe("buildSidebarFolderRows", () => {
 
   it("orders clients, projects and repos by name, archived projects last, when alphabetical", () => {
     const scrambled = [
-      folder("Zenith", ["z1"]),
+      folder("Vandelay", ["z1"]),
       folder("Globex · Lyra · Vitrine"),
       folder("Archived · Old", [], { archived: true }),
       folder("Globex · Orion · Infra"),
@@ -280,7 +297,7 @@ describe("buildSidebarFolderRows", () => {
       "Infra",
       "Rewards",
       "umbrella",
-      "Zenith",
+      "Vandelay",
       "Archived · Old",
     ]);
   });
@@ -387,6 +404,133 @@ describe("buildSidebarFolderRows", () => {
     ]);
     expect(scopedOpen.flatMap(sidebarFolderRowThreads)).toEqual(["s1", "i1", "m1"]);
   });
+
+  it("keeps a settled route thread under a closed client, out of its count, unless it is departing", () => {
+    const build = (isSettledRouteThread?: (thread: string) => boolean) =>
+      buildSidebarFolderRows({
+        folders: [
+          folder("Acme · App", ["a1"], { settled: settledRow("Acme · App", ["s1"]) }),
+          folder("Acme · Infra", [], { settled: settledRow("Acme · Infra", []) }),
+        ],
+        groupByClient: true,
+        expandedById: {},
+        isRouteThread: (thread) => thread === "s1",
+        ...(isSettledRouteThread === undefined ? {} : { isSettledRouteThread }),
+      });
+    expect(build()).toMatchObject([{ kind: "client", threads: ["s1"], hiddenThreads: ["a1"] }]);
+    expect(build(() => false)).toMatchObject([
+      { kind: "client", threads: [], hiddenThreads: ["a1"] },
+    ]);
+  });
+
+  it("lists a folder's shown settled threads after its active ones", () => {
+    const rows = buildSidebarFolderRows({
+      folders: [
+        folder("Initech", ["p1"], { settled: settledRow("Initech", ["s1", "s2"]) }),
+        folder("Vandelay", ["z1"], { settled: settledRow("Vandelay", []) }),
+      ],
+      groupByClient: true,
+      expandedById: {},
+      isRouteThread: () => false,
+    });
+    expect(rows.flatMap(sidebarFolderRowThreads)).toEqual(["p1", "s1", "s2", "z1"]);
+  });
+});
+
+describe("splitSettledThreadsByFolder", () => {
+  const groups = [
+    folder("Acme · App").group,
+    folder("Umbrella").group,
+    folder("Initech").group,
+    folder("Acme · Old", [], { archived: true }).group,
+  ];
+  const thread = (projectId: string, id: string) => ({ environmentId: "local", projectId, id });
+
+  it("hands each folder its settled threads in order and leaves the rest to the shelf", () => {
+    const threads = [
+      thread("Acme · App", "a1"),
+      thread("Gone", "g1"),
+      thread("Acme · Old", "o1"),
+      thread("Acme · App", "a2"),
+    ];
+    const split = splitSettledThreadsByFolder({
+      groups,
+      settledThreads: threads,
+      unloadedCount: (group) => (group.projectKey === "Umbrella" ? 3 : 0),
+    });
+    expect([...split.byProjectKey]).toEqual([
+      ["Acme · App", { threads: [threads[0], threads[3]], unloadedCount: 0 }],
+      ["Umbrella", { threads: [], unloadedCount: 3 }],
+    ]);
+    expect(split.shelfThreads).toEqual([threads[1], threads[2]]);
+    expect(split.folderedProjectKeys).toEqual(
+      new Set(["local:Acme · App", "local:Umbrella", "local:Initech"]),
+    );
+  });
+});
+
+describe("buildSidebarFolderSettled", () => {
+  const rowId = sidebarFolderSettledRowId("Vandelay");
+  const threads = ["s1", "s2", "s3", "s4"];
+  const build = (
+    options: {
+      readonly expanded?: boolean;
+      readonly folderCollapsed?: boolean;
+      readonly route?: string;
+      readonly unlisted?: readonly string[];
+    } = {},
+  ) =>
+    buildSidebarFolderSettled({
+      rowId,
+      threads,
+      unloadedCount: 5,
+      visibleCount: 2,
+      folderCollapsed: options.folderCollapsed ?? false,
+      expandedById: options.expanded === true ? { [rowId]: true } : {},
+      isRouteThread: (thread) => thread === options.route,
+      isListed: (thread) => !(options.unlisted ?? []).includes(thread),
+    });
+
+  it("stays closed by default and counts unloaded threads", () => {
+    expect(rowId).toBe("folder-settled:Vandelay");
+    expect(build()).toEqual({
+      rowId,
+      count: 9,
+      expanded: false,
+      threads: [],
+      hiddenCount: 0,
+      loadedThreads: threads,
+    });
+    expect(build({ route: "s3" }).threads).toEqual(["s3"]);
+  });
+
+  it("lists a page when open, plus the route thread past it", () => {
+    expect(build({ expanded: true })).toMatchObject({
+      expanded: true,
+      threads: ["s1", "s2"],
+      hiddenCount: 7,
+    });
+    expect(build({ expanded: true, route: "s4" })).toMatchObject({
+      threads: ["s1", "s2", "s4"],
+      hiddenCount: 6,
+    });
+    expect(build({ expanded: true, folderCollapsed: true, route: "s4" })).toMatchObject({
+      expanded: true,
+      threads: ["s4"],
+      hiddenCount: 0,
+    });
+  });
+
+  it("holds back rows below the frontier, as the shelf does, except the route thread", () => {
+    expect(build({ expanded: true, unlisted: ["s1"] })).toMatchObject({
+      threads: ["s2", "s3"],
+      hiddenCount: 7,
+    });
+    expect(build({ expanded: true, unlisted: ["s1"], route: "s1" })).toMatchObject({
+      threads: ["s2", "s3", "s1"],
+      hiddenCount: 6,
+    });
+  });
 });
 
 describe("buildSidebarClientRailEntries", () => {
@@ -446,12 +590,12 @@ describe("sidebarClientRailThreads", () => {
 describe("client order in manual mode", () => {
   it("puts a client where the rail does, even when its first project shows no folder", () => {
     const old = folder("Acme · Old");
-    const zenith = folder("Zenith", ["z1"]);
+    const vandelay = folder("Vandelay", ["z1"]);
     const app = folder("Acme · App", ["a1"]);
-    const groups = [old, zenith, app].map((entry) => entry.group);
+    const groups = [old, vandelay, app].map((entry) => entry.group);
     // The empty "Acme · Old" folder is left out of the tree, as the sidebar drops it.
     const rows = buildSidebarFolderRows({
-      folders: [zenith, app],
+      folders: [vandelay, app],
       groupByClient: true,
       alphabetical: false,
       clientOrder: groups,
@@ -464,7 +608,7 @@ describe("client order in manual mode", () => {
     const railNames = buildSidebarClientRailEntries({ groups, alphabetical: false }).map(
       (entry) => entry.name,
     );
-    expect(treeNames).toEqual(["Acme", "Zenith"]);
+    expect(treeNames).toEqual(["Acme", "Vandelay"]);
     expect(railNames).toEqual(treeNames);
   });
 });
