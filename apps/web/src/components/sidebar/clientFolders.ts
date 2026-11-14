@@ -163,11 +163,111 @@ function sortClientEntriesByOrder<TFolder extends { readonly group: ClientFolder
   return [...entries].sort((left, right) => rankOf(left) - rankOf(right));
 }
 
+/** The folder's "Settled · n" row in the sidebar tree, and its key in `projectExpandedById`. */
+export function sidebarFolderSettledRowId(projectKey: string) {
+  return `folder-settled:${projectKey}`;
+}
+
+export interface SidebarFolderSettled<TThread> {
+  readonly rowId: string;
+  /** Every settled thread of the folder, loaded or not. */
+  readonly count: number;
+  readonly expanded: boolean;
+  /** Rows drawn: a page of the list when open, else only the route thread. */
+  readonly threads: readonly TThread[];
+  /** Threads an open row does not list yet; 0 while closed. */
+  readonly hiddenCount: number;
+  /** Every settled thread the client holds for the folder, most recently settled first. */
+  readonly loadedThreads: readonly TThread[];
+}
+
 export interface SidebarProjectFolder<TGroup, TThread> {
   readonly group: TGroup;
   readonly collapsed: boolean;
   readonly threads: readonly TThread[];
   readonly hiddenThreads: readonly TThread[];
+  readonly settled?: SidebarFolderSettled<TThread> | undefined;
+}
+
+/**
+ * Settled threads by the folder that lists them. An archived project's threads stay on the
+ * shelf, so its folder never comes back for its history alone.
+ */
+export function splitSettledThreadsByFolder<
+  TGroup extends {
+    readonly projectKey: string;
+    readonly archived?: boolean | undefined;
+    readonly memberProjectRefs: ReadonlyArray<{
+      readonly environmentId: string;
+      readonly projectId: string;
+    }>;
+  },
+  TThread extends { readonly environmentId: string; readonly projectId: string },
+>(input: {
+  readonly groups: readonly TGroup[];
+  readonly settledThreads: readonly TThread[];
+  /** Older settled threads of the group that the client does not hold. */
+  readonly unloadedCount: (group: TGroup) => number;
+}) {
+  const groupByProject = new Map<string, TGroup>();
+  for (const group of input.groups) {
+    if (group.archived === true) continue;
+    for (const ref of group.memberProjectRefs) {
+      groupByProject.set(`${ref.environmentId}:${ref.projectId}`, group);
+    }
+  }
+  const threadsByGroup = new Map<TGroup, TThread[]>();
+  const shelfThreads: TThread[] = [];
+  for (const thread of input.settledThreads) {
+    const group = groupByProject.get(`${thread.environmentId}:${thread.projectId}`);
+    if (group === undefined) {
+      shelfThreads.push(thread);
+      continue;
+    }
+    const list = threadsByGroup.get(group);
+    if (list === undefined) threadsByGroup.set(group, [thread]);
+    else list.push(thread);
+  }
+  const byProjectKey = new Map<
+    string,
+    { readonly threads: readonly TThread[]; readonly unloadedCount: number }
+  >();
+  for (const group of new Set(groupByProject.values())) {
+    const threads = threadsByGroup.get(group) ?? NO_THREADS;
+    const unloadedCount = input.unloadedCount(group);
+    if (threads.length + unloadedCount > 0) {
+      byProjectKey.set(group.projectKey, { threads, unloadedCount });
+    }
+  }
+  return { byProjectKey, shelfThreads, folderedProjectKeys: new Set(groupByProject.keys()) };
+}
+
+/** A folder's Settled row: closed unless `expandedById` says open, keeping the route thread. */
+export function buildSidebarFolderSettled<TThread>(input: {
+  readonly rowId: string;
+  readonly threads: readonly TThread[];
+  readonly unloadedCount: number;
+  readonly visibleCount: number;
+  readonly folderCollapsed: boolean;
+  readonly expandedById: Readonly<Record<string, boolean>>;
+  readonly isRouteThread: (thread: TThread) => boolean;
+  /** The shelf's frontier rule: a row below the pages read so far waits for them. */
+  readonly isListed: (thread: TThread) => boolean;
+}): SidebarFolderSettled<TThread> {
+  const expanded = input.expandedById[input.rowId] === true;
+  const open = expanded && !input.folderCollapsed;
+  const page = input.threads.filter(input.isListed).slice(0, input.visibleCount);
+  const route = input.threads.find(input.isRouteThread);
+  const visible = route === undefined || page.includes(route) ? page : [...page, route];
+  const count = input.threads.length + input.unloadedCount;
+  return {
+    rowId: input.rowId,
+    count,
+    expanded,
+    threads: open ? visible : route === undefined ? NO_THREADS : [route],
+    hiddenCount: open ? Math.max(0, count - visible.length) : 0,
+    loadedThreads: input.threads,
+  };
 }
 
 export type SidebarFolderRow<TGroup, TThread> =
@@ -227,11 +327,15 @@ export function buildSidebarFolderRows<TGroup extends ClientFolderGroup, TThread
       ];
     }
     const threads = folders.flatMap((folder) => [...folder.threads, ...folder.hiddenThreads]);
+    // Settled threads signal no work, so they stay out of the count but keep the route thread.
+    const settledRoute = folders.flatMap<TThread>(
+      (folder) => folder.settled?.threads.filter(input.isRouteThread) ?? NO_THREADS,
+    );
     return [
       {
         ...head,
         collapsed: true,
-        threads: threads.filter(input.isRouteThread),
+        threads: [...threads.filter(input.isRouteThread), ...settledRoute],
         hiddenThreads: threads.filter((thread) => !input.isRouteThread(thread)),
       },
     ];
@@ -389,5 +493,7 @@ export function sidebarClientRailThreads<
 export function sidebarFolderRowThreads<TGroup, TThread>(
   row: SidebarFolderRow<TGroup, TThread>,
 ): readonly TThread[] {
-  return row.kind === "client" ? row.threads : row.folder.threads;
+  if (row.kind === "client") return row.threads;
+  const settled = row.folder.settled?.threads ?? NO_THREADS;
+  return settled.length === 0 ? row.folder.threads : [...row.folder.threads, ...settled];
 }

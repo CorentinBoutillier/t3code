@@ -65,6 +65,8 @@ export function useOlderSettledShelf(input: {
     environments: shelf,
     visibleCount: input.expanded ? input.visibleCount : 0,
     pages,
+    /** Where listing stops: rows below it wait for the next pages. */
+    frontier,
     grow: (next: ReadonlyMap<EnvironmentId, number>) => setRequested({ scopeKey, pages: next }),
     isListed: (thread: EnvironmentThreadShell) => isListedSettledThread(thread.source, frontier),
     /** Older settled threads in scope that are not local; add it to the local Settled rows. */
