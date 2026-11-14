@@ -5,6 +5,12 @@ import { ChevronDownIcon } from "lucide-react";
 import { memo } from "react";
 
 import { cn } from "~/lib/utils";
+import type { SidebarOrderRef } from "./clientFolderOrder";
+import {
+  NO_SIDEBAR_ORDER_ROW,
+  SidebarOrderRow,
+  type SidebarOrderRowState,
+} from "./clientFolderOrderDrag";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useUiStateStore } from "../../uiStateStore";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -35,21 +41,26 @@ export const SidebarClientFolderHeader = memo(function SidebarClientFolderHeader
   hiddenThreads: readonly EnvironmentThreadShell[];
   onToggle: (rowId: string) => void;
   navigationParent?: string | undefined;
+  // Set when the row can be reordered among its siblings: the level it moves within.
+  orderLevel?: string | undefined;
+  onOrderStep?: ((ref: SidebarOrderRef, direction: -1 | 1, row: HTMLElement) => void) | undefined;
 }) {
   const m = useMessages();
   const { rowId, collapsed, hiddenThreads } = props;
   const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
   const dot = collapsed ? resolveFolderDotWithVisits(hiddenThreads, localLastVisitedAtById) : null;
-  return (
+  const renderRow = (order: SidebarOrderRowState) => (
     <li
       data-testid="sidebar-client-folder"
       className={cn(
         "relative list-none",
         props.navigationParent === undefined && "mt-2 first:mt-0",
+        order.isDragging && "opacity-50",
       )}
     >
       <button
         type="button"
+        {...order.rowProps}
         data-sidebar-row={rowId}
         data-sidebar-parent={props.navigationParent}
         aria-expanded={!collapsed}
@@ -88,5 +99,13 @@ export const SidebarClientFolderHeader = memo(function SidebarClientFolderHeader
         />
       </button>
     </li>
+  );
+  const { orderLevel } = props;
+  return orderLevel === undefined ? (
+    renderRow(NO_SIDEBAR_ORDER_ROW)
+  ) : (
+    <SidebarOrderRow level={orderLevel} id={rowId} onStep={props.onOrderStep}>
+      {renderRow}
+    </SidebarOrderRow>
   );
 });

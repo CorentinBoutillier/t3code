@@ -7,11 +7,17 @@ import { T, useGT, useMessages } from "gt-react";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { CLIENT_FOLDERS_ENABLED_KEY } from "../sidebar/clientFolders";
+import { NO_CLIENT_FOLDER_ORDER, useSidebarClientFolderOrder } from "../sidebar/clientFolderOrder";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { ScopedSwitch } from "./ScopedSwitch";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingResetButton,
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 import { useSearchableSetting } from "./settingsSearch";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { useOptionalSettingsScope, useSettingsScope } from "./SettingsScopeContext";
@@ -296,13 +302,23 @@ function FastWorktreeCheckoutRow() {
   );
 }
 
-function BoringSidebarClientFoldersRow() {
+export function BoringSidebarClientFoldersRow() {
   const [enabled, setEnabled] = useLocalStorage(CLIENT_FOLDERS_ENABLED_KEY, false, Schema.Boolean);
+  const [order, setOrder] = useSidebarClientFolderOrder();
   return (
     <SettingsRow
       title="Group folders by client"
       className="px-0 py-2 sm:px-0"
-      description="Nest project folders under a client when the project is named “Client · Project”, and list clients in a rail beside the sidebar. Saved on this device."
+      description="Nest project folders under a client when the project is named “Client · Project”, and list clients in a rail beside the sidebar. Drag to reorder. Saved on this device."
+      resetAction={
+        enabled && Object.keys(order).length > 0 ? (
+          <SettingResetButton
+            ariaLabel="Reset folder order to default"
+            tooltip="Reset order"
+            onClick={() => setOrder(NO_CLIENT_FOLDER_ORDER)}
+          />
+        ) : null
+      }
       control={
         <Switch
           checked={enabled}

@@ -16,7 +16,7 @@ import { compileResolvedKeybindingsConfig, isMacPlatform } from "@t3tools/shared
 import { derivePhysicalProjectKey } from "@t3tools/client-runtime/state/project-grouping";
 import * as Schema from "effect/Schema";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, fakeTimers, render } from "../../test/render";
 import { openCommandPalette } from "../commandPaletteBus";
@@ -42,6 +42,11 @@ import Sidebar from "./Sidebar";
 import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "./Sidebar.logic";
 import { shortcutLabelForCommand } from "../keybindings";
 import { CLIENT_FOLDERS_ENABLED_KEY, CLIENT_RAIL_SELECTED_KEY } from "./sidebar/clientFolders";
+import {
+  CLIENT_FOLDER_ORDER_KEY,
+  SidebarClientFolderOrder,
+  sidebarRepositoryOrderId,
+} from "./sidebar/clientFolderOrder";
 import { SortableThreadRow } from "./sidebar/SidebarThreadRow";
 import { SidebarProvider } from "./ui/sidebar";
 
@@ -446,6 +451,7 @@ function setupClientFolders(
   );
   stack.defer(() => removeLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY));
   stack.defer(() => removeLocalStorageItem(CLIENT_RAIL_SELECTED_KEY));
+  stack.defer(() => removeLocalStorageItem(CLIENT_FOLDER_ORDER_KEY));
   setLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY, true, Schema.Boolean);
   // Earlier tests leave the settled shelf open and the local API's context menu stubbed.
   removeLocalStorageItem("t3code:sidebar:settled-expanded");
@@ -1241,3 +1247,283 @@ describe("boring sidebar client folders", () => {
     expect(screen.container.querySelectorAll("[data-thread-item]")).toHaveLength(listedRows);
   });
 });
+
+function pointer(type: string, x: number, y: number) {
+  return new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    pointerId: 1,
+    isPrimary: true,
+    button: 0,
+    buttons: type === "pointerup" ? 0 : 1,
+    clientX: x,
+    clientY: y,
+  });
+}
+
+function centreOf(element: Element) {
+  const bounds = element.getBoundingClientRect();
+  return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+}
+
+/** Drags `source` onto `target`, checks the drop line shows, then releases. */
+async function dragOnto(
+  source: Element,
+  target: Element,
+  options: { readonly beforeRelease?: (point: { x: number; y: number }) => Promise<void> } = {},
+) {
+  const from = centreOf(source);
+  const to = centreOf(target);
+  let at = from;
+  using _release = {
+    [Symbol.dispose]: () => document.dispatchEvent(pointer("pointerup", at.x, at.y)),
+  };
+  await act(() => {
+    source.dispatchEvent(pointer("pointerdown", from.x, from.y));
+    document.dispatchEvent(pointer("pointermove", from.x, from.y + 10));
+  });
+  await act(() => {
+    document.dispatchEvent(pointer("pointermove", to.x, to.y));
+  });
+  at = to;
+  await expect.element(page.getByTestId("sidebar-order-drop-line")).toBeInTheDocument();
+  if (options.beforeRelease) await options.beforeRelease(to);
+}
+
+const railOrderIds = () =>
+  [...document.querySelectorAll<HTMLElement>('[data-testid="sidebar-client-rail"] li')].map(
+    (item) => item.dataset.sidebarOrderId ?? "all",
+  );
+const treeOrderIds = (level: string) =>
+  [...document.querySelectorAll<HTMLElement>(`button[data-sidebar-order-level="${level}"]`)].map(
+    (button) => button.dataset.sidebarOrderId,
+  );
+
+const renderSidebar = () =>
+  render(
+    <SidebarProvider>
+      <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+    </SidebarProvider>,
+  );
+
+describe("boring sidebar client folder order", () => {
+  it("reorders rail entries by drag, keeping All first and the tree in step", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { withProjectGroup: true });
+    await using screen = await renderSidebar();
+    const rail = screen.getByTestId("sidebar-client-rail");
+    const railButton = (name: RegExp) => rail.getByRole("button", { name });
+    await expect.element(railButton(/^Vandelay/)).toBeInTheDocument();
+    const [, acmeId, northwindId, vandelayId] = railOrderIds();
+    expect(treeOrderIds("rail")).toEqual([acmeId, northwindId, vandelayId]);
+
+    await dragOnto(railButton(/^Vandelay/).element(), railButton(/^Acme/).element());
+    await vi.waitFor(() =>
+      expect(railOrderIds()).toEqual(["all", vandelayId, acmeId, northwindId]),
+    );
+    await expect.element(railButton(/^All/)).toHaveAttribute("aria-pressed", "true");
+    expect(treeOrderIds("rail")).toEqual([vandelayId, acmeId, northwindId]);
+
+    // "All" is no drag source.
+    using _release = {
+      [Symbol.dispose]: () => document.dispatchEvent(pointer("pointerup", 0, 0)),
+    };
+    const all = centreOf(railButton(/^All/).element());
+    const acme = centreOf(railButton(/^Acme/).element());
+    await act(() => {
+      railButton(/^All/)
+        .element()
+        .dispatchEvent(pointer("pointerdown", all.x, all.y));
+      document.dispatchEvent(pointer("pointermove", all.x, all.y + 10));
+      document.dispatchEvent(pointer("pointermove", acme.x, acme.y));
+    });
+    await expect.element(page.getByTestId("sidebar-order-drop-line")).not.toBeInTheDocument();
+    await act(() => document.dispatchEvent(pointer("pointerup", acme.x, acme.y)));
+    expect(railOrderIds()).toEqual(["all", vandelayId, acmeId, northwindId]);
+  });
+
+  it("reorders repositories within their client only, without a composer ghost", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { withProjectGroup: true });
+    await using screen = await renderSidebar();
+    const acme = screen.getByTestId("sidebar-client-folder").filter({ hasText: "Acme" });
+    await expect.element(acme.getByRole("button")).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(acme.getByRole("button"));
+    await expect.element(acme.getByRole("button")).toHaveAttribute("aria-expanded", "true");
+    const app = screen.getByRole("button", { name: /^App/ });
+    const infra = screen.getByRole("button", { name: /^Infra/ });
+    await expect.element(infra).toBeInTheDocument();
+    const [appId, infraId] = treeOrderIds("client:Acme");
+
+    const listBounds = acme.element().closest("ul")!.getBoundingClientRect();
+    await dragOnto(infra.element(), app.element(), {
+      beforeRelease: async (point) => {
+        await act(() =>
+          document.dispatchEvent(pointer("pointermove", listBounds.right + 40, point.y)),
+        );
+        expect(
+          document.querySelector('body > div[aria-hidden="true"].pointer-events-none'),
+        ).toBeNull();
+        await act(() => document.dispatchEvent(pointer("pointermove", point.x, point.y)));
+      },
+    });
+    await vi.waitFor(() => expect(treeOrderIds("client:Acme")).toEqual([infraId, appId]));
+    expect((await jumpLabelsByThreadId()).get(ThreadId.make("thread-2"))).toBe(JUMP_1_LABEL);
+
+    // A repository never moves out of its client.
+    const vandelay = screen.getByTestId("sidebar-project-folder").filter({ hasText: "Vandelay" });
+    {
+      const from = centreOf(infra.element());
+      const to = centreOf(vandelay.getByRole("button").first().element());
+      await act(() => {
+        infra.element().dispatchEvent(pointer("pointerdown", from.x, from.y));
+        document.dispatchEvent(pointer("pointermove", from.x, from.y + 10));
+      });
+      await act(() => document.dispatchEvent(pointer("pointermove", to.x, to.y)));
+      // The drag is live, yet Vandelay offers no place to land.
+      await expect
+        .element(screen.getByTestId("sidebar-project-folder").filter({ hasText: "Infra" }))
+        .toHaveClass("opacity-50");
+      await expect.element(page.getByTestId("sidebar-order-drop-line")).not.toBeInTheDocument();
+      await act(() => document.dispatchEvent(pointer("pointerup", to.x, to.y)));
+    }
+    expect(treeOrderIds("client:Acme")).toEqual([infraId, appId]);
+    expect(readOrder()["rail"]).toBeUndefined();
+  });
+
+  it("moves the focused header or rail entry one step with Alt+Arrow", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { withProjectGroup: true });
+    await using screen = await renderSidebar();
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await expect.element(rail.getByRole("button", { name: /^Vandelay/ })).toBeInTheDocument();
+    const [, acmeId, northwindId, vandelayId] = railOrderIds();
+    const acme = screen
+      .getByTestId("sidebar-client-folder")
+      .filter({ hasText: "Acme" })
+      .getByRole("button");
+
+    await act(() => acme.element().focus());
+    await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
+    await vi.waitFor(() => expect(treeOrderIds("rail")).toEqual([northwindId, acmeId, vandelayId]));
+    await expect.element(acme).toHaveFocus();
+    expect(railOrderIds()).toEqual(["all", northwindId, acmeId, vandelayId]);
+
+    const railAcme = rail.getByRole("button", { name: /^Acme/ });
+    await act(() => railAcme.element().focus());
+    await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
+    await vi.waitFor(() =>
+      expect(railOrderIds()).toEqual(["all", northwindId, vandelayId, acmeId]),
+    );
+    await expect.element(railAcme).toHaveFocus();
+
+    const railNorthwind = rail.getByRole("button", { name: /^Northwind/ });
+    await act(() => railNorthwind.element().focus());
+    await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
+    expect(railOrderIds()).toEqual(["all", northwindId, vandelayId, acmeId]);
+    await expect.element(railNorthwind).toHaveFocus();
+
+    // A repository steps within its client.
+    await userEvent.click(acme);
+    await expect.element(acme).toHaveAttribute("aria-expanded", "true");
+    const infra = screen.getByRole("button", { name: /^Infra/ });
+    await expect.element(infra).toBeInTheDocument();
+    const [appId, infraId] = treeOrderIds("client:Acme");
+    await act(() => infra.element().focus());
+    await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
+    await vi.waitFor(() => expect(treeOrderIds("client:Acme")).toEqual([infraId, appId]));
+    await expect.element(infra).toHaveFocus();
+    expect(railOrderIds()).toEqual(["all", northwindId, vandelayId, acmeId]);
+  });
+
+  it("drops a client over an open sibling's folders as after that sibling", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { withProjectGroup: true });
+    await using screen = await renderSidebar();
+    const header = (name: string) =>
+      screen.getByTestId("sidebar-client-folder").filter({ hasText: name }).getByRole("button");
+    const northwind = header("Northwind");
+    await expect.element(northwind).toHaveAttribute("aria-expanded", "false");
+    await userEvent.click(northwind);
+    await expect.element(northwind).toHaveAttribute("aria-expanded", "true");
+    const atlas = header("Atlas");
+    await expect.element(atlas).toBeInTheDocument();
+    const [acmeId, northwindId, vandelayId] = treeOrderIds("rail");
+
+    await dragOnto(header("Acme").element(), atlas.element());
+    await vi.waitFor(() => expect(treeOrderIds("rail")).toEqual([northwindId, acmeId, vandelayId]));
+    expect(railOrderIds()).toEqual(["all", northwindId, acmeId, vandelayId]);
+  });
+
+  it("resets the order from the rail's context menu", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { withProjectGroup: true });
+    setLocalStorageItem(
+      CLIENT_FOLDER_ORDER_KEY,
+      { rail: ["client:Northwind", "client:Acme"] },
+      SidebarClientFolderOrder,
+    );
+    await using screen = await renderSidebar();
+    const rail = screen.getByTestId("sidebar-client-rail");
+    await expect.element(rail.getByRole("button", { name: /^Vandelay/ })).toBeInTheDocument();
+    expect(railOrderIds().slice(1, 3)).toEqual(["client:Northwind", "client:Acme"]);
+
+    await userEvent.click(rail.getByRole("button", { name: /^All/ }), { button: "right" });
+    await userEvent.click(page.getByRole("menuitem", { name: "Reset order" }));
+    await vi.waitFor(() =>
+      expect(railOrderIds().slice(1, 3)).toEqual(["client:Acme", "client:Northwind"]),
+    );
+    expect(readOrder()).toEqual({});
+  });
+
+  it("keeps the order across a remount", async () => {
+    using stack = new DisposableStack();
+    setupClientFolders(stack, { withProjectGroup: true });
+    {
+      await using screen = await renderSidebar();
+      const rail = screen.getByTestId("sidebar-client-rail");
+      await expect.element(rail.getByRole("button", { name: /^Vandelay/ })).toBeInTheDocument();
+      await dragOnto(
+        rail.getByRole("button", { name: /^Northwind/ }).element(),
+        rail.getByRole("button", { name: /^Acme/ }).element(),
+      );
+      await vi.waitFor(() =>
+        expect(railOrderIds().slice(1, 3)).toEqual(["client:Northwind", "client:Acme"]),
+      );
+    }
+
+    await using screen = await renderSidebar();
+    await expect
+      .element(screen.getByTestId("sidebar-client-rail").getByRole("button", { name: /^Vandelay/ }))
+      .toBeInTheDocument();
+    expect(railOrderIds().slice(1, 3)).toEqual(["client:Northwind", "client:Acme"]);
+    expect(treeOrderIds("rail").slice(0, 2)).toEqual(["client:Northwind", "client:Acme"]);
+  });
+
+  it("leaves the sidebar unchanged while client folders are off", async () => {
+    using stack = new DisposableStack();
+    const { solo } = setupClientFolders(stack);
+    setLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY, false, Schema.Boolean);
+    // Vandelay first, by its real id: a leak of the stored order would reorder the folders.
+    setLocalStorageItem(
+      CLIENT_FOLDER_ORDER_KEY,
+      { rail: [sidebarRepositoryOrderId(derivePhysicalProjectKey(solo)), "client:Acme"] },
+      SidebarClientFolderOrder,
+    );
+    await using screen = await renderSidebar();
+    const folders = screen.getByTestId("sidebar-project-folder");
+    await expect.element(folders.first()).toBeInTheDocument();
+    expect(folders.all().map((item) => item.element().textContent?.split(/\d/)[0])).toEqual([
+      expect.stringContaining("Acme · App"),
+      expect.stringContaining("Acme · Infra"),
+      expect.stringContaining("Vandelay"),
+    ]);
+    expect(screen.getByTestId("sidebar-client-rail").query()).toBeNull();
+    expect(document.querySelector("button[data-sidebar-order-level]")).toBeNull();
+  });
+});
+
+function readOrder(): Record<string, readonly string[]> {
+  const raw = localStorage.getItem(CLIENT_FOLDER_ORDER_KEY);
+  return raw === null ? {} : JSON.parse(raw);
+}
