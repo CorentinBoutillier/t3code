@@ -13,7 +13,7 @@ import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/model
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
 import { useMessages } from "gt-react";
-import { LayoutGridIcon } from "lucide-react";
+import { InboxIcon, LayoutGridIcon } from "lucide-react";
 import { memo, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
 
@@ -35,6 +35,8 @@ import {
   CLIENT_FOLDERS_ENABLED_KEY,
   CLIENT_RAIL_SELECTED_KEY,
   isSidebarFolderShown,
+  resolveSidebarInboxBadge,
+  SIDEBAR_INBOX_ID,
   sidebarClientRailThreads,
   sidebarThreadProjectRefs,
   sidebarClientFolderLevels,
@@ -76,8 +78,11 @@ export function useSidebarClientRail(input: {
   readonly entries: readonly RailEntry[] | null;
   // Unscoped threads that are neither settled nor snoozed, for the rail's dots.
   readonly liveThreads: readonly EnvironmentThreadShell[];
-  // null is "All"; a stored client that is gone reads as All and returns with its projects.
+  // null is "All" or Inbox; a stored client that is gone reads as All and returns with its projects.
   readonly selected: RailEntry | null;
+  // Every thread, flat and unfiltered; only while the rail shows.
+  readonly inboxSelected: boolean;
+  readonly selectedId: string | null;
   readonly select: (id: string | null) => void;
   // undefined while the rail is off, so the tree keeps its default order.
   readonly order: SidebarClientFolderOrder | undefined;
@@ -113,6 +118,7 @@ export function useSidebarClientRail(input: {
           entry.groups.some((group) => isSidebarFolderShown(group, activeProjectRefs)),
         );
   const selected = entries?.find((entry) => entry.id === storedId) ?? null;
+  const inboxSelected = enabled && input.groups.length > 0 && storedId === SIDEBAR_INBOX_ID;
   // Left out only by the pinned-or-active rule: a project still loading or archived keeps the pick.
   const hiddenSelection =
     selected === null ? (openEntries?.find((entry) => entry.id === storedId) ?? null) : null;
@@ -141,6 +147,8 @@ export function useSidebarClientRail(input: {
     entries,
     liveThreads,
     selected,
+    inboxSelected,
+    selectedId: inboxSelected ? SIDEBAR_INBOX_ID : (selected?.id ?? null),
     select: setStoredId,
     order: enabled ? order : undefined,
     moveEntry,
@@ -199,13 +207,16 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
     };
   };
   const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
+  const isRouteThread = (thread: EnvironmentThreadShell) =>
+    scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeRowThreadKey;
   // Pinned threads and the open one stay out, as on the client header.
-  const threadsByEntry = sidebarClientRailThreads(
-    entries,
-    props.liveThreads,
-    (thread) =>
-      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeRowThreadKey,
-  );
+  const threadsByEntry = sidebarClientRailThreads(entries, props.liveThreads, isRouteThread);
+  // Pinned threads count here: the Inbox gathers everything waiting on the user.
+  const inboxBadge = resolveSidebarInboxBadge({
+    threads: props.liveThreads,
+    isRouteThread,
+    dotOf: (threads) => resolveFolderDotWithVisits(threads, localLastVisitedAtById),
+  });
   // One Tab stop, on the picked entry; arrows move between entries.
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (
@@ -292,6 +303,18 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
         >
           <ul className="flex flex-col gap-1 px-1 py-2">
             <SidebarClientRailButton
+              id={SIDEBAR_INBOX_ID}
+              name="Inbox"
+              tooltip="Inbox: every thread"
+              logo={undefined}
+              kind="client"
+              selected={selectedId === SIDEBAR_INBOX_ID}
+              dot={null}
+              badge={inboxBadge}
+              dropEdge={null}
+              onSelect={onSelect}
+            />
+            <SidebarClientRailButton
               id={null}
               name="All"
               tooltip="All clients"
@@ -334,14 +357,16 @@ const SidebarClientRailButton = memo(function SidebarClientRailButton(props: {
   kind: RailEntry["kind"];
   selected: boolean;
   dot: FolderDot;
+  badge?: ReturnType<typeof resolveSidebarInboxBadge>;
   dropEdge: SidebarOrderDrop["position"] | null;
   onSelect: (id: string | null) => void;
 }) {
   const m = useMessages();
-  const { id, name, logo, dot, onSelect } = props;
-  // "All" stays first: neither draggable nor a target.
+  const { id, name, logo, dot, badge, onSelect } = props;
+  const isInbox = id === SIDEBAR_INBOX_ID;
+  // "Inbox" and "All" stay first: neither draggable nor a target.
   const order = useSidebarOrderRow({
-    level: id === null ? undefined : SIDEBAR_RAIL_ORDER_LEVEL,
+    level: id === null || isInbox ? undefined : SIDEBAR_RAIL_ORDER_LEVEL,
     id: id ?? "all",
   });
   return (
@@ -375,7 +400,9 @@ const SidebarClientRailButton = memo(function SidebarClientRailButton(props: {
           }
         >
           <span className="relative">
-            {logo === undefined ? (
+            {isInbox ? (
+              <InboxIcon aria-hidden className="size-6 text-sidebar-muted-foreground" />
+            ) : logo === undefined ? (
               <LayoutGridIcon aria-hidden className="size-6 text-sidebar-muted-foreground" />
             ) : (
               // The fallback monogram is derived from the title, so a client is named after itself.
@@ -393,11 +420,25 @@ const SidebarClientRailButton = memo(function SidebarClientRailButton(props: {
                 )}
               />
             ) : null}
+            {badge ? (
+              <span
+                aria-hidden
+                data-testid="sidebar-inbox-badge"
+                className={cn(
+                  "absolute -end-1.5 -top-1.5 h-4 min-w-4 rounded-full px-1 text-center text-3xs leading-4 font-medium text-black tabular-nums ring-2 ring-sidebar",
+                  FOLDER_DOT_CLASS_NAME[badge.dot],
+                )}
+              >
+                {/* With auto-settle off, tens are common, so a single digit would hide too much. */}
+                {badge.count > 99 ? "99+" : badge.count}
+              </span>
+            ) : null}
           </span>
           <span className="w-full truncate text-center text-2xs text-sidebar-foreground/90">
             {name}
           </span>
           {dot ? <span className="sr-only">{m(FOLDER_DOT_LABEL[dot])}</span> : null}
+          {badge ? <span className="sr-only">, {badge.count} waiting</span> : null}
         </TooltipTrigger>
         <TooltipPopup side="right">{props.tooltip}</TooltipPopup>
       </Tooltip>

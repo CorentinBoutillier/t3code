@@ -9,6 +9,7 @@ import {
   type LocalApi,
   ProjectId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -41,7 +42,11 @@ import type { Project } from "../types";
 import Sidebar from "./Sidebar";
 import { THREAD_JUMP_HINT_SHOW_DELAY_MS } from "./Sidebar.logic";
 import { shortcutLabelForCommand } from "../keybindings";
-import { CLIENT_FOLDERS_ENABLED_KEY, CLIENT_RAIL_SELECTED_KEY } from "./sidebar/clientFolders";
+import {
+  CLIENT_FOLDERS_ENABLED_KEY,
+  CLIENT_RAIL_SELECTED_KEY,
+  SIDEBAR_INBOX_ID,
+} from "./sidebar/clientFolders";
 import {
   CLIENT_FOLDER_ORDER_KEY,
   SidebarClientFolderOrder,
@@ -719,12 +724,13 @@ describe("boring sidebar client folders", () => {
     const rail = screen.getByTestId("sidebar-client-rail");
     await expect.element(rail).toBeInTheDocument();
     const railButtons = rail.getByRole("button");
-    expect(railButtons.all()).toHaveLength(4);
+    expect(railButtons.all()).toHaveLength(5);
     // Thread 2's failure shows on Acme whatever the rail scopes the list to.
-    for (const [index, name] of ["All", "Acme, failed", "Northwind", "Vandelay"].entries()) {
+    const names = ["Inbox, 1 waiting", "All", "Acme, failed", "Northwind", "Vandelay"];
+    for (const [index, name] of names.entries()) {
       await expect.element(railButtons.nth(index)).toHaveAccessibleName(name);
     }
-    await expect.element(railButtons.first()).toHaveAttribute("aria-pressed", "true");
+    await expect.element(railButtons.nth(1)).toHaveAttribute("aria-pressed", "true");
     await expect.element(screen.getByText("Thread 7", { exact: true }).first()).toBeInTheDocument();
 
     const northwind = rail.getByRole("button", { name: /^Northwind/ });
@@ -986,17 +992,169 @@ describe("boring sidebar client folders", () => {
     );
     const buttons = screen.getByTestId("sidebar-client-rail").getByRole("button");
     expect(buttons.all().map((button) => button.element().getAttribute("tabindex"))).toEqual([
+      "-1",
       "0",
       "-1",
       "-1",
     ]);
-    await act(() => (buttons.first().element() as HTMLElement).focus());
+    await act(() => (buttons.nth(1).element() as HTMLElement).focus());
     await userEvent.keyboard("{ArrowDown}");
-    await expect.element(buttons.nth(1)).toHaveFocus();
-    await userEvent.keyboard("{End}");
     await expect.element(buttons.nth(2)).toHaveFocus();
+    await userEvent.keyboard("{End}");
+    await expect.element(buttons.nth(3)).toHaveFocus();
     await userEvent.keyboard("{ArrowUp}");
-    await expect.element(buttons.nth(1)).toHaveFocus();
+    await expect.element(buttons.nth(2)).toHaveFocus();
+    await userEvent.keyboard("{Home}");
+    await expect.element(buttons.first()).toHaveAccessibleName(/^Inbox/);
+    await expect.element(buttons.first()).toHaveFocus();
+  });
+
+  it("lists every client's threads flat under Inbox and keeps it picked when a thread opens", async () => {
+    using stack = new DisposableStack();
+    const { app, threads } = setupClientFolders(stack);
+    const appKey = derivePhysicalProjectKey(app);
+    useUiStateStore.setState({ sidebarProjectScopeKeys: [appKey] });
+    const routeReveal = { observedKey: null, pendingKey: null };
+    await using screen = await render(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    const rail = screen.getByTestId("sidebar-client-rail");
+    const inbox = rail.getByRole("button", { name: /^Inbox/ });
+    await userEvent.click(inbox);
+    await expect.element(inbox).toHaveAttribute("aria-pressed", "true");
+    for (const shown of ["Thread 0", "Thread 1", "Thread 2", "Thread 3"]) {
+      await expect.element(screen.getByText(shown, { exact: true }).first()).toBeInTheDocument();
+    }
+    expect(screen.getByTestId("sidebar-client-folder").all()).toHaveLength(0);
+    expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(0);
+    // The user's filter does not apply here, so no control shows it.
+    expect(screen.getByLabelText(/Filter .*threads by project/).query()).toBeNull();
+    expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([appKey]);
+
+    vi.mocked(useThreadRouteTarget).mockReturnValue({
+      kind: "server",
+      threadRef: { environmentId: threads[3]!.environmentId, threadId: threads[3]!.id },
+    });
+    await screen.rerender(
+      <SidebarProvider>
+        <Sidebar routeReveal={routeReveal} />
+      </SidebarProvider>,
+    );
+    await expect.element(screen.getByText("Thread 3", { exact: true }).first()).toBeInTheDocument();
+    await expect.element(inbox).toHaveAttribute("aria-pressed", "true");
+    expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([appKey]);
+
+    vi.mocked(openCommandPalette).mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "New thread", exact: true }));
+    expect(openCommandPalette).toHaveBeenCalledExactlyOnceWith({ open: "new-thread-in" });
+
+    await userEvent.click(rail.getByRole("button", { name: "All", exact: true }));
+    await expect
+      .element(screen.getByLabelText("Filter threads by project: Acme · App", { exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(screen.getByText("Thread 3", { exact: true }).first())
+      .not.toBeInTheDocument();
+  });
+
+  it("keeps Inbox across a remount, with the Working shelf following its setting", async () => {
+    using stack = new DisposableStack();
+    const { solo, threads } = setupClientFolders(stack, { settled: true });
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads,
+      {
+        ...threadShell(solo.id, 5),
+        runtime: {
+          status: "running" as const,
+          activeRunId: null,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          providerName: "Codex",
+          lastError: null,
+          updatedAt: "2026-03-09T10:00:00.000Z",
+        },
+      },
+    ]);
+    {
+      await using screen = await renderSidebar();
+      const inbox = screen
+        .getByTestId("sidebar-client-rail")
+        .getByRole("button", { name: /^Inbox/ });
+      await expect
+        .element(screen.getByText("Thread 5", { exact: true }).first())
+        .toBeInTheDocument();
+      expect(screen.getByTestId("sidebar-working-header").query()).toBeNull();
+      await userEvent.click(inbox);
+      await expect.element(inbox).toHaveAttribute("aria-pressed", "true");
+    }
+
+    await using screen = await renderSidebar();
+    await expect
+      .element(screen.getByTestId("sidebar-client-rail").getByRole("button", { name: /^Inbox/ }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(localStorage.getItem(CLIENT_RAIL_SELECTED_KEY)).toBe(JSON.stringify(SIDEBAR_INBOX_ID));
+    await expect.element(screen.getByTestId("sidebar-working-header")).toBeInTheDocument();
+  });
+
+  it("badges Inbox with the threads waiting on the user, in the most urgent colour", async () => {
+    using stack = new DisposableStack();
+    const { app, solo, threads } = setupClientFolders(stack, { settled: true });
+    const failedRuntime = threads[2]!.runtime;
+    const unread = (projectId: ProjectId, index: number) => ({
+      ...threadShell(projectId, index),
+      latestRun: {
+        runId: RunId.make(`run-${index}`),
+        status: "completed" as const,
+        requestedAt: "2026-03-09T09:00:00.000Z",
+        startedAt: "2026-03-09T09:00:00.000Z",
+        completedAt: "2026-03-09T10:00:00.000Z",
+        assistantMessageId: null,
+      },
+      lastVisitedAt: "2026-03-09T08:00:00.000Z",
+    });
+    const approval = { ...threadShell(solo.id, 8), hasPendingApprovals: true };
+    const waiting = [
+      // The open thread waits on nobody.
+      { ...threads[0]!, runtime: failedRuntime },
+      ...threads.slice(1),
+      unread(app.id, 9),
+      { ...unread(solo.id, 7), pinnedAt: "2026-03-09T10:00:00.000Z" },
+      {
+        ...threadShell(solo.id, 5),
+        runtime: { ...failedRuntime!, status: "running" as const },
+      },
+    ];
+    vi.mocked(useQuietThreadShells).mockReturnValue([...waiting, approval]);
+    await using screen = await renderSidebar();
+    const rail = screen.getByTestId("sidebar-client-rail");
+    const inbox = rail.getByRole("button", { name: /^Inbox/ });
+    await expect.element(inbox).toHaveAccessibleName("Inbox, 4 waiting");
+    const badge = rail.getByTestId("sidebar-inbox-badge");
+    await expect.element(badge).toHaveTextContent("4");
+    await expect.element(badge).toHaveClass("bg-warning");
+
+    vi.mocked(useQuietThreadShells).mockReturnValue(waiting);
+    await screen.rerender(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    await expect.element(inbox).toHaveAccessibleName("Inbox, 3 waiting");
+    await expect.element(badge).toHaveClass("bg-error");
+
+    vi.mocked(useQuietThreadShells).mockReturnValue([
+      ...threads.slice(0, 2),
+      threadShell(threads[2]!.projectId, 2),
+      threads[3]!,
+    ]);
+    await screen.rerender(
+      <SidebarProvider>
+        <Sidebar routeReveal={{ observedKey: null, pendingKey: null }} />
+      </SidebarProvider>,
+    );
+    await expect.element(inbox).toHaveAccessibleName("Inbox");
+    expect(badge.query()).toBeNull();
   });
 
   it("lists a folder's settled threads under a closed Settled row and out of the shelf", async () => {
@@ -1185,8 +1343,8 @@ describe("boring sidebar client folders", () => {
     );
     const rail = screen.getByTestId("sidebar-client-rail");
     await expect.element(rail.getByRole("button", { name: /^Acme/ })).toBeInTheDocument();
-    // All, Acme and Vandelay: Umbrella has nothing pinned and nothing active.
-    expect(rail.getByRole("button").all()).toHaveLength(3);
+    // Inbox, All, Acme and Vandelay: Umbrella has nothing pinned and nothing active.
+    expect(rail.getByRole("button").all()).toHaveLength(4);
     await expect.element(rail.getByRole("button", { name: /^Umbrella/ })).not.toBeInTheDocument();
     await expect
       .element(
@@ -1424,7 +1582,7 @@ describe("boring sidebar client folders", () => {
     await expect
       .element(rail.getByRole("button", { name: "All", exact: true }))
       .toHaveAttribute("aria-pressed", "true");
-    expect(rail.getByRole("button").all()).toHaveLength(1);
+    expect(rail.getByRole("button").all()).toHaveLength(2);
     expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(0);
   });
 
@@ -1583,9 +1741,12 @@ async function dragOnto(
   if (options.beforeRelease) await options.beforeRelease(to);
 }
 
+// Inbox and All carry no order id: neither moves, and both read by their place.
 const railOrderIds = () =>
   [...document.querySelectorAll<HTMLElement>('[data-testid="sidebar-client-rail"] li')].map(
-    (item) => item.dataset.sidebarOrderId ?? "all",
+    (item) =>
+      item.dataset.sidebarOrderId ??
+      (item.querySelector("[data-rail-entry]")?.getAttribute("data-rail-entry") || "all"),
   );
 const treeOrderIds = (level: string) =>
   [...document.querySelectorAll<HTMLElement>(`button[data-sidebar-order-level="${level}"]`)].map(
@@ -1607,32 +1768,34 @@ describe("boring sidebar client folder order", () => {
     const rail = screen.getByTestId("sidebar-client-rail");
     const railButton = (name: RegExp) => rail.getByRole("button", { name });
     await expect.element(railButton(/^Vandelay/)).toBeInTheDocument();
-    const [, acmeId, northwindId, vandelayId] = railOrderIds();
+    const [, , acmeId, northwindId, vandelayId] = railOrderIds();
     expect(treeOrderIds("rail")).toEqual([acmeId, northwindId, vandelayId]);
 
     await dragOnto(railButton(/^Vandelay/).element(), railButton(/^Acme/).element());
     await vi.waitFor(() =>
-      expect(railOrderIds()).toEqual(["all", vandelayId, acmeId, northwindId]),
+      expect(railOrderIds()).toEqual(["inbox", "all", vandelayId, acmeId, northwindId]),
     );
     await expect.element(railButton(/^All/)).toHaveAttribute("aria-pressed", "true");
     expect(treeOrderIds("rail")).toEqual([vandelayId, acmeId, northwindId]);
 
-    // "All" is no drag source.
+    // Neither "Inbox" nor "All" is a drag source.
     using _release = {
       [Symbol.dispose]: () => document.dispatchEvent(pointer("pointerup", 0, 0)),
     };
-    const all = centreOf(railButton(/^All/).element());
     const acme = centreOf(railButton(/^Acme/).element());
-    await act(() => {
-      railButton(/^All/)
-        .element()
-        .dispatchEvent(pointer("pointerdown", all.x, all.y));
-      document.dispatchEvent(pointer("pointermove", all.x, all.y + 10));
-      document.dispatchEvent(pointer("pointermove", acme.x, acme.y));
-    });
-    await expect.element(page.getByTestId("sidebar-order-drop-line")).not.toBeInTheDocument();
-    await act(() => document.dispatchEvent(pointer("pointerup", acme.x, acme.y)));
-    expect(railOrderIds()).toEqual(["all", vandelayId, acmeId, northwindId]);
+    for (const fixed of [/^Inbox/, /^All/]) {
+      const from = centreOf(railButton(fixed).element());
+      await act(() => {
+        railButton(fixed)
+          .element()
+          .dispatchEvent(pointer("pointerdown", from.x, from.y));
+        document.dispatchEvent(pointer("pointermove", from.x, from.y + 10));
+        document.dispatchEvent(pointer("pointermove", acme.x, acme.y));
+      });
+      await expect.element(page.getByTestId("sidebar-order-drop-line")).not.toBeInTheDocument();
+      await act(() => document.dispatchEvent(pointer("pointerup", acme.x, acme.y)));
+    }
+    expect(railOrderIds()).toEqual(["inbox", "all", vandelayId, acmeId, northwindId]);
   });
 
   it("reorders repositories within their client only, without a composer ghost", async () => {
@@ -1690,7 +1853,7 @@ describe("boring sidebar client folder order", () => {
     await using screen = await renderSidebar();
     const rail = screen.getByTestId("sidebar-client-rail");
     await expect.element(rail.getByRole("button", { name: /^Vandelay/ })).toBeInTheDocument();
-    const [, acmeId, northwindId, vandelayId] = railOrderIds();
+    const [, , acmeId, northwindId, vandelayId] = railOrderIds();
     const acme = screen
       .getByTestId("sidebar-client-folder")
       .filter({ hasText: "Acme" })
@@ -1700,21 +1863,27 @@ describe("boring sidebar client folder order", () => {
     await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
     await vi.waitFor(() => expect(treeOrderIds("rail")).toEqual([northwindId, acmeId, vandelayId]));
     await expect.element(acme).toHaveFocus();
-    expect(railOrderIds()).toEqual(["all", northwindId, acmeId, vandelayId]);
+    expect(railOrderIds()).toEqual(["inbox", "all", northwindId, acmeId, vandelayId]);
 
     const railAcme = rail.getByRole("button", { name: /^Acme/ });
     await act(() => railAcme.element().focus());
     await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
     await vi.waitFor(() =>
-      expect(railOrderIds()).toEqual(["all", northwindId, vandelayId, acmeId]),
+      expect(railOrderIds()).toEqual(["inbox", "all", northwindId, vandelayId, acmeId]),
     );
     await expect.element(railAcme).toHaveFocus();
 
     const railNorthwind = rail.getByRole("button", { name: /^Northwind/ });
     await act(() => railNorthwind.element().focus());
     await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
-    expect(railOrderIds()).toEqual(["all", northwindId, vandelayId, acmeId]);
+    expect(railOrderIds()).toEqual(["inbox", "all", northwindId, vandelayId, acmeId]);
     await expect.element(railNorthwind).toHaveFocus();
+
+    const railInbox = rail.getByRole("button", { name: /^Inbox/ });
+    await act(() => railInbox.element().focus());
+    await userEvent.keyboard("{Alt>}{ArrowDown}{/Alt}");
+    expect(railOrderIds()).toEqual(["inbox", "all", northwindId, vandelayId, acmeId]);
+    await expect.element(railInbox).toHaveFocus();
 
     // A repository steps within its client.
     await userEvent.click(acme);
@@ -1726,7 +1895,7 @@ describe("boring sidebar client folder order", () => {
     await userEvent.keyboard("{Alt>}{ArrowUp}{/Alt}");
     await vi.waitFor(() => expect(treeOrderIds("client:Acme")).toEqual([infraId, appId]));
     await expect.element(infra).toHaveFocus();
-    expect(railOrderIds()).toEqual(["all", northwindId, vandelayId, acmeId]);
+    expect(railOrderIds()).toEqual(["inbox", "all", northwindId, vandelayId, acmeId]);
   });
 
   it("drops a client over an open sibling's folders as after that sibling", async () => {
@@ -1745,7 +1914,7 @@ describe("boring sidebar client folder order", () => {
 
     await dragOnto(header("Acme").element(), atlas.element());
     await vi.waitFor(() => expect(treeOrderIds("rail")).toEqual([northwindId, acmeId, vandelayId]));
-    expect(railOrderIds()).toEqual(["all", northwindId, acmeId, vandelayId]);
+    expect(railOrderIds()).toEqual(["inbox", "all", northwindId, acmeId, vandelayId]);
   });
 
   it("resets the order from the rail's context menu", async () => {
@@ -1759,12 +1928,12 @@ describe("boring sidebar client folder order", () => {
     await using screen = await renderSidebar();
     const rail = screen.getByTestId("sidebar-client-rail");
     await expect.element(rail.getByRole("button", { name: /^Vandelay/ })).toBeInTheDocument();
-    expect(railOrderIds().slice(1, 3)).toEqual(["client:Northwind", "client:Acme"]);
+    expect(railOrderIds().slice(2, 4)).toEqual(["client:Northwind", "client:Acme"]);
 
     await userEvent.click(rail.getByRole("button", { name: /^All/ }), { button: "right" });
     await userEvent.click(page.getByRole("menuitem", { name: "Reset order" }));
     await vi.waitFor(() =>
-      expect(railOrderIds().slice(1, 3)).toEqual(["client:Acme", "client:Northwind"]),
+      expect(railOrderIds().slice(2, 4)).toEqual(["client:Acme", "client:Northwind"]),
     );
     expect(readOrder()).toEqual({});
   });
@@ -1781,7 +1950,7 @@ describe("boring sidebar client folder order", () => {
         rail.getByRole("button", { name: /^Acme/ }).element(),
       );
       await vi.waitFor(() =>
-        expect(railOrderIds().slice(1, 3)).toEqual(["client:Northwind", "client:Acme"]),
+        expect(railOrderIds().slice(2, 4)).toEqual(["client:Northwind", "client:Acme"]),
       );
     }
 
@@ -1789,7 +1958,7 @@ describe("boring sidebar client folder order", () => {
     await expect
       .element(screen.getByTestId("sidebar-client-rail").getByRole("button", { name: /^Vandelay/ }))
       .toBeInTheDocument();
-    expect(railOrderIds().slice(1, 3)).toEqual(["client:Northwind", "client:Acme"]);
+    expect(railOrderIds().slice(2, 4)).toEqual(["client:Northwind", "client:Acme"]);
     expect(treeOrderIds("rail").slice(0, 2)).toEqual(["client:Northwind", "client:Acme"]);
   });
 
@@ -1797,6 +1966,7 @@ describe("boring sidebar client folder order", () => {
     using stack = new DisposableStack();
     const { solo } = setupClientFolders(stack);
     setLocalStorageItem(CLIENT_FOLDERS_ENABLED_KEY, false, Schema.Boolean);
+    setLocalStorageItem(CLIENT_RAIL_SELECTED_KEY, SIDEBAR_INBOX_ID, Schema.NullOr(Schema.String));
     // Vandelay first, by its real id: a leak of the stored order would reorder the folders.
     setLocalStorageItem(
       CLIENT_FOLDER_ORDER_KEY,

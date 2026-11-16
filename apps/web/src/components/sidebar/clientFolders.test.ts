@@ -8,6 +8,7 @@ import {
   buildSidebarFolderSettled,
   groupSidebarFoldersByClient,
   isSidebarFolderShown,
+  resolveSidebarInboxBadge,
   sidebarClientFolderLevels,
   sidebarClientRailThreads,
   sidebarFolderRowOrder,
@@ -692,6 +693,27 @@ describe("sidebarClientRailThreads dot input", () => {
     expect(sidebarClientRailThreads(entries, threads, (thread) => thread.id === "open")).toEqual(
       new Map([["client:Acme", [threads[2]]]]),
     );
+  });
+});
+
+describe("resolveSidebarInboxBadge", () => {
+  it("counts the threads waiting on the user and skips working, quiet and open ones", () => {
+    const threads = [
+      { id: "approval", dot: "attention" },
+      { id: "failed", dot: "failed" },
+      { id: "done", dot: "unread" },
+      { id: "running", dot: "working" },
+      { id: "quiet", dot: null },
+      { id: "open", dot: "failed" },
+    ] as const;
+    const badgeOf = (list: readonly (typeof threads)[number][]) =>
+      resolveSidebarInboxBadge({
+        threads: list,
+        isRouteThread: (thread) => thread.id === "open",
+        dotOf: (waiting) => waiting[0]?.dot ?? null,
+      });
+    expect(badgeOf(threads)?.count).toBe(3);
+    expect(badgeOf(threads.slice(3))).toBeNull();
   });
 });
 
