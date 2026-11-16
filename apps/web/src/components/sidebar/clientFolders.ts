@@ -484,6 +484,25 @@ export function buildSidebarFolderRows<
 }
 
 export const CLIENT_RAIL_SELECTED_KEY = "t3code:sidebar:client-rail-selected";
+// Stored like a client pick; client ids always carry a `client:` or `project:` prefix.
+export const SIDEBAR_INBOX_ID = "inbox";
+
+type SidebarInboxDot = "attention" | "failed" | "unread";
+
+/** Threads waiting on the user, the open one aside; the folder dot's rule picks the colour. */
+export function resolveSidebarInboxBadge<TThread>(input: {
+  readonly threads: readonly TThread[];
+  readonly isRouteThread: (thread: TThread) => boolean;
+  readonly dotOf: (threads: readonly TThread[]) => SidebarInboxDot | "working" | null;
+}): { readonly count: number; readonly dot: SidebarInboxDot } | null {
+  const isWaiting = (dot: ReturnType<typeof input.dotOf>): dot is SidebarInboxDot =>
+    dot !== null && dot !== "working";
+  const waiting = input.threads.filter(
+    (thread) => !input.isRouteThread(thread) && isWaiting(input.dotOf([thread])),
+  );
+  const dot = input.dotOf(waiting);
+  return isWaiting(dot) ? { count: waiting.length, dot } : null;
+}
 
 export interface SidebarClientRailEntry<TGroup> {
   // Persisted as the selection: the client's tree row id, or `project:<projectKey>`.

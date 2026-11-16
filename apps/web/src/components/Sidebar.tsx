@@ -1368,6 +1368,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     entries: clientRailEntries,
     liveThreads: clientRailLiveThreads,
     selected: chosenClient,
+    selectedId: railSelectedId,
+    inboxSelected,
     select: setChosenClientId,
     order: clientFolderOrder,
     moveEntry,
@@ -1385,7 +1387,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const resetClientFolderOrder = useStableCallback(resetOrder);
   // The user's filter keeps the projects that stay in view; a new client starts at the top.
   const selectRailClient = useStableCallback((id: string | null) => {
-    if (id === (chosenClient?.id ?? null)) return;
+    if (id === railSelectedId) return;
     const nextClient = clientRailEntries?.find((entry) => entry.id === id) ?? null;
     setChosenClientId(id);
     setProjectScopeKeys(
@@ -1404,7 +1406,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   );
   const chosenProjectScopeKeys = resolveSidebarProjectScopeKeys({
     groups: projectGroups,
-    keys: persistedProjectScopeKeys,
+    keys: inboxSelected ? [] : persistedProjectScopeKeys,
     settings: projectGroupingSettings,
     canClearMissingScope: allProjectSnapshotsReady && allProjectConfigsReady,
   }).filter((key) => !archivedProjectKeys.has(key) && (chosenClientProjectKeys?.has(key) ?? true));
@@ -1701,12 +1703,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     delegatedUnderParent,
     routeRowThreadKey,
     departingThreadKey,
-    folderGroups: boringSidebarEnabled
-      ? sidebarScopeGroups.length === 0
-        ? // An archived project keeps a folder for its active threads, below the rest.
-          [...scopeGroups, ...projectGroups.filter((project) => project.archived)]
-        : sidebarScopeGroups
-      : null,
+    folderGroups:
+      boringSidebarEnabled && !inboxSelected
+        ? sidebarScopeGroups.length === 0
+          ? // An archived project keeps a folder for its active threads, below the rest.
+            [...scopeGroups, ...projectGroups.filter((project) => project.archived)]
+          : sidebarScopeGroups
+        : null,
     // A picked client shows its pinned or active folders only; the filter keeps every one.
     keepEmptyFolders: (group) =>
       scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
@@ -3140,7 +3143,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               branch: thread.branch ?? null,
               // An archived project is not a filter choice.
               projectFilter:
-                threadProjectGroup && !threadProjectGroup.archived
+                threadProjectGroup && !threadProjectGroup.archived && !inboxSelected
                   ? {
                       label: threadProjectGroup.displayName,
                       isActive: projectScopeKeys.includes(threadProjectGroup.projectKey),
@@ -3531,7 +3534,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           clientRailEntries !== null && scopeGroups.length > 0 ? (
             <SidebarClientRail
               entries={clientRailEntries}
-              selectedId={selectedClient?.id ?? null}
+              selectedId={revealWidensClient ? null : railSelectedId}
               onSelect={selectRailClient}
               onMove={moveClientFolderEntry}
               onResetOrder={resetClientFolderOrder}
@@ -3548,6 +3551,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             <SidebarGroup className="z-[1]">
               <SidebarThreadHeader
                 hasProjects={projectGroups.length > 0}
+                projectScopeHidden={inboxSelected}
                 projectScope={
                   <Combobox
                     items={projectScopeItems}
