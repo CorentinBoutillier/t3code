@@ -470,18 +470,21 @@ function AgentFeedbackRow() {
 }
 
 export function BoringSidebarClientFoldersRow() {
+  const gt = useGT();
   const [enabled, setEnabled] = useLocalStorage(CLIENT_FOLDERS_ENABLED_KEY, false, Schema.Boolean);
   const [order, setOrder] = useSidebarClientFolderOrder();
   return (
     <SettingsRow
-      title="Group folders by client"
+      title={gt("Group folders by client")}
       className="px-0 py-2 sm:px-0"
-      description="Nest project folders under a client when the project is named “Client · Project”, and list clients in a rail beside the sidebar. Drag to reorder. Saved on this device."
+      description={gt(
+        "Nest project folders under a client when the project is named “Client · Project”, and list clients in a rail beside the sidebar. Drag to reorder. Saved on this device.",
+      )}
       resetAction={
         enabled && Object.keys(order).length > 0 ? (
           <SettingResetButton
-            ariaLabel="Reset folder order to default"
-            tooltip="Reset order"
+            ariaLabel={gt("Reset folder order to default")}
+            tooltip={gt("Reset order")}
             onClick={() => setOrder(NO_CLIENT_FOLDER_ORDER)}
           />
         ) : null
@@ -490,7 +493,7 @@ export function BoringSidebarClientFoldersRow() {
         <Switch
           checked={enabled}
           onCheckedChange={(checked) => setEnabled(Boolean(checked))}
-          aria-label="Group folders by client"
+          aria-label={gt("Group folders by client")}
         />
       }
     />

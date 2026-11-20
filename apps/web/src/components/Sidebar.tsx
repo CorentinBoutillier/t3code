@@ -1485,7 +1485,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       ? lookupProjectScopeItems
       : lookupProjectScopeItems.flatMap((item) =>
           item.value === "all"
-            ? [{ ...item, label: `All ${chosenClient.name} projects` }]
+            ? [{ ...item, label: gt("All {client} projects", { client: chosenClient.name }) }]
             : chosenClientProjectKeys.has(item.value)
               ? [item]
               : [],

@@ -12,7 +12,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import { settlePromise } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
-import { useMessages } from "gt-react";
+import { useGT, useMessages } from "gt-react";
 import { InboxIcon, LayoutGridIcon } from "lucide-react";
 import { memo, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
@@ -181,6 +181,7 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
   liveThreads: readonly EnvironmentThreadShell[];
   routeRowThreadKey: string | null;
 }) {
+  const gt = useGT();
   const { entries, selectedId, onSelect, onMove, routeRowThreadKey } = props;
   const [drag, setDrag] = useState<{
     readonly activeId: string;
@@ -270,7 +271,7 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
     const { onResetOrder } = props;
     void (async () => {
       const clicked = await settlePromise(() =>
-        api.contextMenu.show([{ id: "reset-order", label: "Reset order" }], position, source),
+        api.contextMenu.show([{ id: "reset-order", label: gt("Reset order") }], position, source),
       );
       if (clicked._tag === "Success" && clicked.value === "reset-order") onResetOrder();
     })();
@@ -278,7 +279,7 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
   return (
     <div
       role="group"
-      aria-label="Clients"
+      aria-label={gt("Clients", { $context: "sidebar rail listing client folders" })}
       data-testid="sidebar-client-rail"
       onKeyDown={onKeyDown}
       onContextMenu={onContextMenu}
@@ -304,8 +305,8 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
           <ul className="flex flex-col gap-1 px-1 py-2">
             <SidebarClientRailButton
               id={SIDEBAR_INBOX_ID}
-              name="Inbox"
-              tooltip="Inbox: every thread"
+              name={gt("Inbox", { $context: "sidebar rail entry" })}
+              tooltip={gt("Inbox: every thread")}
               logo={undefined}
               kind="client"
               selected={selectedId === SIDEBAR_INBOX_ID}
@@ -316,8 +317,8 @@ export const SidebarClientRail = memo(function SidebarClientRail(props: {
             />
             <SidebarClientRailButton
               id={null}
-              name="All"
-              tooltip="All clients"
+              name={gt("All", { $context: "sidebar rail entry, every client" })}
+              tooltip={gt("All clients")}
               logo={undefined}
               kind="client"
               selected={selectedId === null}
@@ -361,6 +362,7 @@ const SidebarClientRailButton = memo(function SidebarClientRailButton(props: {
   dropEdge: SidebarOrderDrop["position"] | null;
   onSelect: (id: string | null) => void;
 }) {
+  const gt = useGT();
   const m = useMessages();
   const { id, name, logo, dot, badge, onSelect } = props;
   const isInbox = id === SIDEBAR_INBOX_ID;
@@ -438,7 +440,9 @@ const SidebarClientRailButton = memo(function SidebarClientRailButton(props: {
             {name}
           </span>
           {dot ? <span className="sr-only">{m(FOLDER_DOT_LABEL[dot])}</span> : null}
-          {badge ? <span className="sr-only">, {badge.count} waiting</span> : null}
+          {badge ? (
+            <span className="sr-only">{gt(", {count} waiting", { count: badge.count })}</span>
+          ) : null}
         </TooltipTrigger>
         <TooltipPopup side="right">{props.tooltip}</TooltipPopup>
       </Tooltip>

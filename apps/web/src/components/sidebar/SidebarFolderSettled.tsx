@@ -1,6 +1,7 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
 import type { OrchestrationV2OlderSettledCursor } from "@t3tools/contracts";
+import { useGT } from "gt-react";
 import { ChevronDownIcon } from "lucide-react";
 import { memo, useEffect, type Dispatch, type SetStateAction } from "react";
 
@@ -21,6 +22,7 @@ export const SidebarFolderSettledHeader = memo(function SidebarFolderSettledHead
   navigationParent: string;
   depth: 0 | 1 | 2;
 }) {
+  const gt = useGT();
   return (
     <li data-testid="sidebar-folder-settled" className="list-none">
       <button
@@ -34,7 +36,7 @@ export const SidebarFolderSettledHeader = memo(function SidebarFolderSettledHead
           threadInset(props.depth),
         )}
       >
-        <span className="min-w-0 flex-1 truncate">{`Settled · ${props.count}`}</span>
+        <span className="min-w-0 flex-1 truncate">{`${gt("Settled", { $context: "sidebar section" })} · ${props.count}`}</span>
         <ChevronDownIcon
           aria-hidden
           className={cn("size-3 shrink-0 transition-transform", !props.expanded && "-rotate-90")}
@@ -81,6 +83,7 @@ export function SidebarFolderSettledMore(props: {
   setFrontiers: Dispatch<SetStateAction<FolderSettledFrontiers>>;
   depth: 0 | 1 | 2;
 }) {
+  const gt = useGT();
   const shelf = useOlderSettledShelf({
     scopes: props.scopes,
     expanded: true,
@@ -116,10 +119,12 @@ export function SidebarFolderSettledMore(props: {
       >
         <ChevronDownIcon aria-hidden className="size-3 shrink-0" />
         {shelf.loading
-          ? "Loading"
+          ? gt("Loading")
           : shelf.failed
-            ? "Could not load older threads. Retry"
-            : `Show ${Math.min(props.hiddenCount, props.pageCount)} more`}
+            ? gt("Could not load older threads. Retry")
+            : gt("{count, plural, one {Show {count} more} other {Show {count} more}}", {
+                count: Math.min(props.hiddenCount, props.pageCount),
+              })}
       </button>
     </li>
   );
