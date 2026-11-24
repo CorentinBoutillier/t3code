@@ -36,7 +36,11 @@ it.effect("a policy with telemetry off stops relay tracing to T3 Connect", () =>
 
 it.effect("relay tracing waits for the desktop shell's telemetry opt-out", () => {
   const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
-  const environment: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
+  // Opted in at launch, so only the pending discovery holds tracing back.
+  const environment: NodeJS.ProcessEnv = {
+    T3CODE_TELEMETRY_ENABLED: "true",
+    T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1",
+  };
   return Effect.void.pipe(
     Effect.withSpan("relay.request"),
     RelayTracing.withRelayClientTracing,
@@ -66,7 +70,8 @@ it.effect("relay tracing waits for the desktop shell's telemetry opt-out", () =>
 });
 
 it("reports the server's relay tracing policy to clients", () => {
-  assert.isTrue(allowedFor({}, undefined));
+  assert.isFalse(allowedFor({}, undefined));
+  assert.isTrue(allowedFor({ T3CODE_TELEMETRY_ENABLED: "true" }, undefined));
   assert.isFalse(allowedFor({ T3CODE_TELEMETRY_ENABLED: "false" }, undefined));
   assert.isFalse(allowedFor({ CI: "true" }, undefined));
   assert.isTrue(allowedFor({ CI: "true", T3CODE_TELEMETRY_ENABLED: "true" }, undefined));

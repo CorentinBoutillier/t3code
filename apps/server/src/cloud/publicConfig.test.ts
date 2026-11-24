@@ -55,6 +55,16 @@ it.effect("derives direct Clerk OAuth endpoints from statically injected public 
   }),
 );
 
+it("keeps relay tracing credentials while consent is unset, for a later shell opt-in", () => {
+  const fallback = {
+    tracesUrl: "https://embedded.example.test/v1/traces",
+    tracesDataset: "embedded-dataset",
+    tracesToken: "embedded-token",
+  };
+  assert.deepEqual(resolveRelayClientTracingConfig({}, fallback), fallback);
+  assert.equal(resolveRelayClientTracingConfig({ DO_NOT_TRACK: "1" }, fallback), null);
+});
+
 it("product opt-out disables relay tracing with either built-in or runtime credentials", () => {
   const fallback = {
     tracesUrl: "https://embedded.example.test/v1/traces",

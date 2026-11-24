@@ -351,11 +351,10 @@ export const isRelayTracingEnabled = (env: Readonly<Record<string, string | unde
     ...sdkFlags,
     telemetry: flag("T3CODE_TELEMETRY_ENABLED", T3CODE_TRUE, T3CODE_FALSE, String),
   }).pipe(
+    // Fork: relay tracing is opt-in, like product analytics.
     Effect.map(
       ({ telemetry, t3, spec }) =>
-        (telemetry.value ?? !isCiEnvironment(env)) &&
-        !isDoNotTrackSet(env) &&
-        !(t3.value ?? spec.value ?? false),
+        telemetry.value === true && !isDoNotTrackSet(env) && !(t3.value ?? spec.value ?? false),
     ),
     Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnvRecord(env))),
     Effect.orDie,

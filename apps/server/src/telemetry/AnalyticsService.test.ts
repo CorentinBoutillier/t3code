@@ -7,6 +7,7 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -186,29 +187,37 @@ const sendFor = (
 
 it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService test", (it) => {
   it.effect("waits for desktop shell consent and honors a late telemetry opt-out", () =>
-    Effect.gen(function* () {
-      const env: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
-      const batches = yield* sendFor(
-        0,
-        respondWithStatus(204),
+    Effect.forEach(
+      // Fork: the shell profile can opt in even when startup had no setting.
+      [{ T3CODE_TELEMETRY_ENABLED: true }, {}],
+      (telemetryEnv) =>
         Effect.gen(function* () {
-          const analytics = yield* AnalyticsService.AnalyticsService;
-          yield* analytics.record("test.before-discovery");
-          yield* analytics.flush;
-          env.T3CODE_TELEMETRY_ENABLED = "false";
-          delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
-          yield* analytics.record("test.opted-out");
-          yield* analytics.flush;
-          env.T3CODE_TELEMETRY_ENABLED = "true";
-          yield* analytics.record("test.allowed");
-          yield* analytics.flush;
+          const env: NodeJS.ProcessEnv = { T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1" };
+          const batches = yield* sendFor(
+            0,
+            respondWithStatus(204),
+            Effect.gen(function* () {
+              const analytics = yield* AnalyticsService.AnalyticsService;
+              yield* analytics.record("test.before-discovery");
+              yield* analytics.flush;
+              env.T3CODE_TELEMETRY_ENABLED = "false";
+              delete env.T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING;
+              yield* analytics.record("test.opted-out");
+              yield* analytics.flush;
+              env.T3CODE_TELEMETRY_ENABLED = "true";
+              yield* analytics.record("test.allowed");
+              yield* analytics.flush;
+            }),
+            undefined,
+            telemetryEnv,
+          ).pipe(Effect.provideService(HostProcess.Environment, env));
+          assert.deepEqual(
+            batches.flat().map((event) => event.event),
+            ["test.allowed"],
+          );
         }),
-      ).pipe(Effect.provideService(HostProcess.Environment, env));
-      assert.deepEqual(
-        batches.flat().map((event) => event.event),
-        ["test.allowed"],
-      );
-    }),
+      { discard: true },
+    ),
   );
 
   it.effect("sends nothing while DO_NOT_TRACK is set", () =>
@@ -460,47 +469,61 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AnalyticsService
     }),
   );
 
-  it.effect("does not send batch requests when telemetry is disabled", () =>
-    Effect.gen(function* () {
-      const capturedPaths: Array<string> = [];
-      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
-        prefix: "t3-telemetry-disabled-",
-      });
-      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
-      const layerConfig = ConfigProvider.layer(
-        ConfigProvider.fromUnknown({
-          T3CODE_TELEMETRY_ENABLED: false,
-          T3CODE_POSTHOG_KEY: "phc_test_key",
-          T3CODE_POSTHOG_HOST: "http://localhost",
-        }),
-      );
-      const layerBatchServer = HttpServer.serve(
+  it.effect("sends nothing and reads no identity unless telemetry is enabled", () =>
+    Effect.forEach(
+      [{ T3CODE_TELEMETRY_ENABLED: false }, {}],
+      (telemetryEnv) =>
         Effect.gen(function* () {
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          capturedPaths.push(request.url);
-          return HttpServerResponse.jsonUnsafe({});
+          const capturedPaths: Array<string> = [];
+          const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+            prefix: "t3-telemetry-disabled-",
+          });
+          const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
+          const layerConfig = ConfigProvider.layer(
+            ConfigProvider.fromUnknown({
+              ...telemetryEnv,
+              T3CODE_POSTHOG_KEY: "phc_test_key",
+              T3CODE_POSTHOG_HOST: "http://localhost",
+            }),
+          );
+          const layerBatchServer = HttpServer.serve(
+            Effect.gen(function* () {
+              const request = yield* HttpServerRequest.HttpServerRequest;
+              capturedPaths.push(request.url);
+              return HttpServerResponse.jsonUnsafe({});
+            }),
+          );
+          const layerRuntime = layerTelemetry.pipe(
+            Layer.provide(layerConfig),
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(HostProcess.Platform, "linux"),
+                Layer.succeed(HostProcess.Architecture, "arm64"),
+                ManagedPolicy.layerTest(),
+              ),
+            ),
+            Layer.provideMerge(NodeHttpServer.layerTest),
+          );
+
+          const identityWritten = yield* Effect.gen(function* () {
+            yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
+            const analytics = yield* AnalyticsService.AnalyticsService;
+            assert.isFalse(yield* analytics.enabled);
+            yield* analytics.record("test.disabled", { index: 1 });
+            yield* analytics.recordOwners(
+              [{ source: "device", ownerId: "a".repeat(64) }],
+              "client",
+            );
+            yield* analytics.flush;
+            const { anonymousIdPath } = yield* ServerConfig.ServerConfig;
+            const fileSystem = yield* FileSystem.FileSystem;
+            return yield* fileSystem.exists(anonymousIdPath);
+          }).pipe(Effect.provide(layerRuntime));
+
+          assert.deepEqual(capturedPaths, []);
+          assert.isFalse(identityWritten);
         }),
-      );
-      const layerRuntime = layerTelemetry.pipe(
-        Layer.provide(layerConfig),
-        Layer.provide(
-          Layer.mergeAll(
-            Layer.succeed(HostProcess.Platform, "linux"),
-            Layer.succeed(HostProcess.Architecture, "arm64"),
-            ManagedPolicy.layerTest(),
-          ),
-        ),
-        Layer.provideMerge(NodeHttpServer.layerTest),
-      );
-
-      yield* Effect.gen(function* () {
-        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
-        const analytics = yield* AnalyticsService.AnalyticsService;
-        yield* analytics.record("test.disabled", { index: 1 });
-        yield* analytics.flush;
-      }).pipe(Effect.provide(layerRuntime));
-
-      assert.deepEqual(capturedPaths, []);
-    }),
+      { discard: true },
+    ),
   );
 });

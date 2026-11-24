@@ -87,7 +87,9 @@ export function resolveRelayClientTracingConfig(
   env: Readonly<Record<string, string | undefined>> = process.env,
   fallback = buildTimeRelayClientTracing,
 ) {
-  if (!isRelayTracingEnabled(env)) {
+  // Fork: tracing is opt-in and a desktop shell can opt in after startup, so only an explicit
+  // opt-out drops the exporter here; `allowedFor` checks consent per span.
+  if (!isRelayTracingEnabled({ T3CODE_TELEMETRY_ENABLED: "true", ...env })) {
     return null;
   }
 
