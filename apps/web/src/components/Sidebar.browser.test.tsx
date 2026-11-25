@@ -1206,8 +1206,11 @@ describe("boring sidebar client folders", () => {
     }
     expect(screen.getByTestId("sidebar-client-folder").all()).toHaveLength(0);
     expect(screen.getByTestId("sidebar-project-folder").all()).toHaveLength(0);
-    // The user's filter does not apply here, so no control shows it.
-    expect(screen.getByLabelText(/Filter .*threads by project/).query()).toBeNull();
+    // The user's filter does not apply here, so no control shows it, but projects can be added.
+    expect(screen.getByLabelText(/^Projects/).query()).toBeNull();
+    vi.mocked(openCommandPalette).mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "Add project", exact: true }));
+    expect(openCommandPalette).toHaveBeenCalledExactlyOnceWith({ open: "add-project" });
     expect(useUiStateStore.getState().sidebarProjectScopeKeys).toEqual([appKey]);
 
     vi.mocked(useThreadRouteTarget).mockReturnValue({

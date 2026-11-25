@@ -6,6 +6,7 @@ import {
   buildSidebarClientRailEntries,
   buildSidebarFolderRows,
   buildSidebarFolderSettled,
+  clientProjectScopeItems,
   groupSidebarFoldersByClient,
   isSidebarFolderShown,
   resolveSidebarInboxBadge,
@@ -1030,5 +1031,21 @@ describe("a step on a level the tree shows only in part", () => {
         (entry) => entry.name,
       ),
     ).toEqual(["Globex", "Initech", "Acme"]);
+  });
+});
+
+describe("clientProjectScopeItems", () => {
+  it("keeps All, renamed for the client, Add project and the client's projects only", () => {
+    const items = [
+      { value: "add-project", label: "Add project" },
+      { value: "all", label: "All projects" },
+      { value: "acme-app", label: "Acme · App" },
+      { value: "globex-app", label: "Globex · App" },
+    ];
+    expect(clientProjectScopeItems(items, new Set(["acme-app"]), "All Acme projects")).toEqual([
+      { value: "add-project", label: "Add project" },
+      { value: "all", label: "All Acme projects" },
+      { value: "acme-app", label: "Acme · App" },
+    ]);
   });
 });

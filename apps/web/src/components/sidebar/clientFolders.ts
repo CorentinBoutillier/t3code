@@ -1,6 +1,6 @@
 import type { ProjectIconOverride } from "@t3tools/contracts";
 
-import { orderItemsByPreferredIds } from "../Sidebar.logic";
+import { ADD_PROJECT_SCOPE_ITEM_VALUE, orderItemsByPreferredIds } from "../Sidebar.logic";
 import {
   SIDEBAR_RAIL_ORDER_LEVEL,
   sidebarRepositoryOrderId,
@@ -727,4 +727,17 @@ export function sidebarOrderDropLine<TGroup extends OrderRowGroup, TThread>(inpu
   if (drop.position === "before") return { index, depth: target.depth };
   const end = rows.findIndex((row, at) => at > index && row.depth <= target.depth);
   return { index: end === -1 ? rows.length : end, depth: target.depth };
+}
+
+/** A picked client's project menu: its projects, Add project, and "All" meaning all of them. */
+export function clientProjectScopeItems<
+  TItem extends { readonly value: string; readonly label: string },
+>(items: readonly TItem[], clientProjectKeys: ReadonlySet<string>, allLabel: string): TItem[] {
+  return items.flatMap((item) =>
+    item.value === "all"
+      ? [{ ...item, label: allLabel }]
+      : item.value === ADD_PROJECT_SCOPE_ITEM_VALUE || clientProjectKeys.has(item.value)
+        ? [item]
+        : [],
+  );
 }
